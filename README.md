@@ -1,10 +1,19 @@
 # RGB Collision Guardrail
 
-A safety layer for mobile robots that sits on the operating system side (DimOS) between whatever produces motion commands (a person-follower, a nav stack, teleop) and the robot's motors, and vets each command against a single RGB camera before it goes out. If the camera shows a likely frontal collision it **clamps** or **stops** forward motion; otherwise the command **passes** through untouched. CPU-only, 10 Hz.
+[![CI](https://github.com/pmg5408/dimos-collision-guardrail/actions/workflows/ci.yml/badge.svg)](https://github.com/pmg5408/dimos-collision-guardrail/actions/workflows/ci.yml)
+
+An inline gate on a robot's motion-command stream. It sits between whatever produces the commands (a person-follower, a nav stack, teleop) and the motors, and vets each one against a single RGB camera before it passes. If the camera shows a likely frontal collision it **clamps** or **stops** forward motion; otherwise the command **passes** through untouched. CPU-only, 10 Hz.
 
 Built as a contribution to [dimOS](https://github.com/dimensionalOS/dimos), an open-source robotics OS, and proposed upstream in [dimensionalOS/dimos#1748](https://github.com/dimensionalOS/dimos/pull/1748).
 
-> **Note on running this repo:** these files are extracted from my dimOS branch and target dimOS's module/stream runtime (`dimos.core`, `dimos.msgs`), which isn't vendored here. This is a *code-reading* repo — the design, the safety reasoning, and the tests are the artifact. The PR link above shows it in its native context.
+> **Running it:** the guardrail targets dimOS's module/stream runtime (`dimos.core`, `dimos.msgs`), which isn't vendored here. A small local stub of those interfaces stands in for them, so the full test suite and a demo run standalone — the stubs are a harness, not a dimOS reimplementation, and the [PR](https://github.com/dimensionalOS/dimos/pull/1748) shows the code in its native context.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest                    # full suite
+python examples/demo.py   # watch it clamp and stop on synthetic frames
+```
 
 ---
 
@@ -89,11 +98,15 @@ The suite (three files, shared helpers in [`test_utils.py`](dimos/control/safety
 ## Repo map
 
 ```
-dimos/control/safety/
+dimos/control/safety/          # the guardrail: module + policy + tests
 ├── rgb_collision_guardrail.py                  # module: I/O, scheduling, freshness, fail-closed gating
 ├── guardrail_policy.py                         # policy: optical flow + hysteresis state machine
 ├── test_guardrail_policy.py                    # policy unit tests
 ├── test_rgb_collision_guardrail.py             # module unit tests
 ├── test_rgb_collision_guardrail_integration.py # end-to-end + concurrency tests
 └── test_utils.py                               # fake transports, synthetic frames, shared helpers
+
+dimos/{core,msgs,utils}/       # local stubs of the dimOS runtime interfaces, so the above runs standalone
+examples/demo.py               # feeds synthetic frames through the module, prints the state ladder
+pyproject.toml                 # dependencies + pytest configuration
 ```
