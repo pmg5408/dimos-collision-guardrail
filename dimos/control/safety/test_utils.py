@@ -76,6 +76,9 @@ class SequencePolicy:
             return decision
         return self._decisions[-1]
 
+    def reset(self) -> None:
+        self._index = 0
+
 
 def _textured_gray_image(*, width: int = 160, height: int = 120, shift_x: int = 0) -> Image:
     yy, xx = np.indices((height, width))

@@ -20,7 +20,7 @@ import time
 from typing import Any, Self
 
 from pydantic import Field, model_validator
-from reactivex.disposable import Disposable
+from reactivex.disposable import CompositeDisposable, Disposable
 
 from dimos.control.safety.guardrail_policy import (
     GuardrailDecision,
@@ -176,11 +176,19 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
     @rpc
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("RGB guardrail is already running")
+
         super().start()
         self._stop_event.clear()
 
+        self._disposables.dispose()
+        self._disposables = CompositeDisposable()
+
         with self._condition:
+            self._runtime_state = _GuardrailRuntimeState()
             self._runtime_state.next_risk_time = time.monotonic()
+        self._policy.reset()
 
         self._disposables.add(Disposable(self.color_image.subscribe(self._on_color_image)))
         self._disposables.add(

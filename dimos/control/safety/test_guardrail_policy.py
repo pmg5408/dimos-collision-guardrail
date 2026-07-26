@@ -195,6 +195,27 @@ def test_frozen_camera_degrades_within_n_frames() -> None:
         assert decision.publish_immediately is True
 
 
+def test_reset_clears_static_scene_counter() -> None:
+    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(static_scene_frame_count=2))
+    frame = _textured_gray_image()
+    cmd = _forward_cmd()
+
+    def evaluate_identical() -> GuardrailState:
+        return policy.evaluate(
+            previous_image=frame,
+            current_image=frame,
+            incoming_cmd_vel=cmd,
+            health=_fresh_health(),
+        ).state
+
+    assert evaluate_identical() == GuardrailState.PASS
+    assert evaluate_identical() == GuardrailState.SENSOR_DEGRADED
+
+    policy.reset()
+
+    assert evaluate_identical() == GuardrailState.PASS
+
+
 @pytest.mark.parametrize(
     ("bad_frame_position", "bad_frame_kind", "expected_reason"),
     [

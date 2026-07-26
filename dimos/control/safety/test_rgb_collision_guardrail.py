@@ -51,6 +51,9 @@ class RaisingPolicy:
     ) -> GuardrailDecision:
         raise RuntimeError("synthetic policy failure")
 
+    def reset(self) -> None:
+        pass
+
 
 class CountingPassPolicy:
     def __init__(self) -> None:
@@ -80,6 +83,10 @@ class CountingPassPolicy:
             ),
             reason="counting_pass",
         )
+
+    def reset(self) -> None:
+        with self._lock:
+            self._call_count = 0
 
 
 @pytest.fixture
@@ -446,5 +453,69 @@ def test_fast_upstream_commands_reuse_last_risk_decision() -> None:
 
         assert policy.call_count == 1
         assert policy.call_count < 3
+    finally:
+        guardrail.stop()
+
+
+def test_stop_publishes_zero_as_final_command() -> None:
+    policy = CountingPassPolicy()
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
+
+    forward_cmd = _cmd(0.4, angular_z=0.3)
+
+    try:
+        cmd_transport.publish(forward_cmd)
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+
+        _wait_for_output(outputs, lambda twist: twist == forward_cmd)
+        for _ in range(5):
+            cmd_transport.publish(forward_cmd)
+    finally:
+        guardrail.stop()
+
+    final_output: Twist | None = None
+    while True:
+        try:
+            final_output = outputs.get_nowait()
+        except queue.Empty:
+            break
+
+    assert final_output == Twist.zero()
+
+
+def test_double_start_raises() -> None:
+    policy = CountingPassPolicy()
+    guardrail, _image_transport, _cmd_transport, _outputs = _start_threaded_guardrail(policy)
+
+    try:
+        with pytest.raises(RuntimeError):
+            guardrail.start()
+    finally:
+        guardrail.stop()
+
+
+def test_restart_resets_runtime_state() -> None:
+    stop_cmd = Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.3])
+    policy = SequencePolicy(
+        [_decision(GuardrailState.STOP_LATCHED, stop_cmd, publish_immediately=True)]
+    )
+    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(policy)
+
+    try:
+        cmd_transport.publish(_cmd(0.4, angular_z=0.3))
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+        _wait_for_decision(guardrail, lambda d: d.state == GuardrailState.STOP_LATCHED)
+    finally:
+        guardrail.stop()
+
+    with guardrail._condition:
+        assert guardrail._runtime_state.state == GuardrailState.STOP_LATCHED
+
+    guardrail.start()
+    try:
+        with guardrail._condition:
+            assert guardrail._runtime_state.state == GuardrailState.INIT
     finally:
         guardrail.stop()

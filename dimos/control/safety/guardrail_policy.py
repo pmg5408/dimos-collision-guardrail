@@ -90,6 +90,8 @@ class GuardrailPolicy(Protocol):
         health: GuardrailHealth,
     ) -> GuardrailDecision: ...
 
+    def reset(self) -> None: ...
+
 
 class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
     """Forward-motion RGB guardrail using flow magnitude in a central lower ROI."""
@@ -224,6 +226,10 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
             "forward_flow_clear",
             mean_flow_magnitude,
         )
+
+    def reset(self) -> None:
+        self._reset_hysteresis()
+        self._static_frame_hits = 0
 
     def _to_resized_gray(self, image: Image) -> GrayImage:
         gray = cast("GrayImage", image.to_grayscale().data)
