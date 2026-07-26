@@ -78,6 +78,7 @@ class OpticalFlowMagnitudePolicyConfig:
     stop_frame_count: int
     clear_frame_count: int
     stop_release_frame_count: int
+    static_scene_frame_count: int
 
 
 class GuardrailPolicy(Protocol):
@@ -110,6 +111,7 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
         self._stop_hits = 0
         self._clear_hits = 0
         self._below_stop_hits = 0
+        self._static_frame_hits = 0
 
     def evaluate(
         self,
@@ -180,6 +182,19 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
                 risk_score=1.0,
                 publish_immediately=True,
             )
+
+        if np.array_equal(previous_roi, current_roi):
+            self._static_frame_hits += 1
+            if self._static_frame_hits >= self._config.static_scene_frame_count:
+                self._reset_hysteresis()
+                return self._zero_decision(
+                    GuardrailState.SENSOR_DEGRADED,
+                    "static_scene",
+                    risk_score=1.0,
+                    publish_immediately=True,
+                )
+        else:
+            self._static_frame_hits = 0
 
         mean_flow_magnitude = self._mean_flow_magnitude(previous_roi, current_roi)
         next_state = self._next_state(mean_flow_magnitude)

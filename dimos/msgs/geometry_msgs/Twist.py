@@ -26,10 +26,7 @@ class Twist:
     """Linear/angular velocity command with mutable xyz components.
 
     The constructor copies its inputs into fresh ``_Vec3`` instances, so a
-    decision derived from an incoming command never aliases that command. (The
-    real dimOS ``Twist`` storage model is unknown here, which is why the
-    aliasing question in IMPROVEMENTS I3 can only be settled against real
-    ``dimos.msgs``.)
+    decision derived from an incoming command never aliases that command.
     """
 
     def __init__(

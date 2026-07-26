@@ -79,6 +79,7 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     stop_frame_count: int = Field(default=2, ge=1)
     clear_frame_count: int = Field(default=3, ge=1)
     stop_release_frame_count: int = Field(default=2, ge=1)
+    static_scene_frame_count: int = Field(default=3, ge=1)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> Self:
@@ -169,6 +170,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             stop_frame_count=self.config.stop_frame_count,
             clear_frame_count=self.config.clear_frame_count,
             stop_release_frame_count=self.config.stop_release_frame_count,
+            static_scene_frame_count=self.config.static_scene_frame_count,
         )
         return OpticalFlowMagnitudeGuardrailPolicy(policy_config)
 
