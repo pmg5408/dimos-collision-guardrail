@@ -148,7 +148,18 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
         if forward_speed <= self._config.forward_motion_deadband_mps:
             return self._pass_decision(incoming_cmd_vel, "forward_guard_inactive", 0.0)
 
-        previous_gray, current_gray = self._prepare_gray_pair(previous_image, current_image)
+        previous_gray = self._to_resized_gray(previous_image)
+        current_gray = self._to_resized_gray(current_image)
+
+        if previous_gray.shape != current_gray.shape:
+            self._reset_hysteresis()
+            return self._zero_decision(
+                GuardrailState.SENSOR_DEGRADED,
+                "frame_shape_mismatch",
+                risk_score=1.0,
+                publish_immediately=True,
+            )
+
         previous_roi, current_roi = self._extract_forward_rois(previous_gray, current_gray)
 
         if previous_roi.size == 0 or current_roi.size == 0:
@@ -197,22 +208,6 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
             incoming_cmd_vel,
             "forward_flow_clear",
             mean_flow_magnitude,
-        )
-
-    def _prepare_gray_pair(
-        self,
-        previous_image: Image,
-        current_image: Image,
-    ) -> tuple[GrayImage, GrayImage]:
-        previous_gray = self._to_resized_gray(previous_image)
-        current_gray = self._to_resized_gray(current_image)
-
-        shared_height = min(previous_gray.shape[0], current_gray.shape[0])
-        shared_width = min(previous_gray.shape[1], current_gray.shape[1])
-
-        return (
-            np.ascontiguousarray(previous_gray[:shared_height, :shared_width]),
-            np.ascontiguousarray(current_gray[:shared_height, :shared_width]),
         )
 
     def _to_resized_gray(self, image: Image) -> GrayImage:

@@ -154,6 +154,22 @@ def test_stale_image_health_degrades_to_zero(image_pair: tuple[Image, Image]) ->
     assert decision.publish_immediately is True
 
 
+def test_frame_shape_mismatch_degrades_to_zero() -> None:
+    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+
+    decision = policy.evaluate(
+        previous_image=_textured_gray_image(width=160, height=120),
+        current_image=_textured_gray_image(width=160, height=90),
+        incoming_cmd_vel=_forward_cmd(),
+        health=_fresh_health(),
+    )
+
+    assert decision.state == GuardrailState.SENSOR_DEGRADED
+    assert decision.reason == "frame_shape_mismatch"
+    assert decision.cmd_vel == Twist.zero()
+    assert decision.publish_immediately is True
+
+
 @pytest.mark.parametrize(
     ("bad_frame_position", "bad_frame_kind", "expected_reason"),
     [
