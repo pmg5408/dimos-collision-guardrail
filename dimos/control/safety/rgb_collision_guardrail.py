@@ -210,9 +210,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         with self._condition:
             self._condition.notify_all()
 
-        if self.config.publish_zero_on_stop:
-            self.safe_cmd_vel.publish(Twist.zero())
-
         if self._thread is not None:
             self._thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
             if self._thread.is_alive():
@@ -221,6 +218,9 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                     timeout_s=_THREAD_JOIN_TIMEOUT_S,
                 )
             self._thread = None
+
+        if self.config.publish_zero_on_stop:
+            self.safe_cmd_vel.publish(Twist.zero())
 
         logger.info("RGB guardrail stopped")
         super().stop()
@@ -307,7 +307,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                 if cmd_vel_to_publish is not None:
                     publish_time = now
 
-            if cmd_vel_to_publish is not None and publish_time is not None:
+            if (
+                cmd_vel_to_publish is not None
+                and publish_time is not None
+                and not self._stop_event.is_set()
+            ):
                 self.safe_cmd_vel.publish(cmd_vel_to_publish)
                 with self._condition:
                     self._runtime_state.last_publish_time = publish_time
