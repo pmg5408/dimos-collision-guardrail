@@ -17,12 +17,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from dimos.control.safety.guardrail_hysteresis import (
+    HysteresisConfig,
+    RiskHysteresis,
+    RiskLevel,
+)
 from dimos.control.safety.guardrail_policy import (
     GuardrailHealth,
-    GuardrailState,
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
 )
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.control.safety.test_utils import (
     _textured_gray_image,
 )
@@ -30,15 +35,15 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 
 
-def _policy_config(
+def _policy(
     *,
     caution_frame_count: int = 2,
     stop_frame_count: int = 2,
     clear_frame_count: int = 3,
     stop_release_frame_count: int = 2,
     static_scene_frame_count: int = 3,
-) -> OpticalFlowMagnitudePolicyConfig:
-    return OpticalFlowMagnitudePolicyConfig(
+) -> OpticalFlowMagnitudeGuardrailPolicy:
+    config = OpticalFlowMagnitudePolicyConfig(
         forward_motion_deadband_mps=0.05,
         clamp_forward_speed_mps=0.1,
         flow_downsample_width_px=160,
@@ -51,12 +56,17 @@ def _policy_config(
         occlusion_extreme_fraction_threshold=0.9,
         caution_flow_magnitude_threshold=0.8,
         stop_flow_magnitude_threshold=1.5,
-        caution_frame_count=caution_frame_count,
-        stop_frame_count=stop_frame_count,
-        clear_frame_count=clear_frame_count,
-        stop_release_frame_count=stop_release_frame_count,
         static_scene_frame_count=static_scene_frame_count,
     )
+    hysteresis = RiskHysteresis(
+        HysteresisConfig(
+            caution_frame_count=caution_frame_count,
+            stop_frame_count=stop_frame_count,
+            clear_frame_count=clear_frame_count,
+            stop_release_frame_count=stop_release_frame_count,
+        )
+    )
+    return OpticalFlowMagnitudeGuardrailPolicy(config, hysteresis)
 
 
 def _forward_cmd(
@@ -111,7 +121,7 @@ def image_pair() -> tuple[Image, Image]:
     ],
 )
 def test_forward_guard_inactive_passthrough(image_pair: tuple[Image, Image], cmd: Twist) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
 
     decision = policy.evaluate(
         previous_image=image_pair[0],
@@ -126,7 +136,7 @@ def test_forward_guard_inactive_passthrough(image_pair: tuple[Image, Image], cmd
 
 
 def test_missing_previous_frame_returns_init_zero(image_pair: tuple[Image, Image]) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
 
     decision = policy.evaluate(
         previous_image=image_pair[0],
@@ -141,7 +151,7 @@ def test_missing_previous_frame_returns_init_zero(image_pair: tuple[Image, Image
 
 
 def test_stale_image_health_degrades_to_zero(image_pair: tuple[Image, Image]) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
 
     decision = policy.evaluate(
         previous_image=image_pair[0],
@@ -157,7 +167,7 @@ def test_stale_image_health_degrades_to_zero(image_pair: tuple[Image, Image]) ->
 
 
 def test_frame_shape_mismatch_degrades_to_zero() -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
 
     decision = policy.evaluate(
         previous_image=_textured_gray_image(width=160, height=120),
@@ -173,7 +183,7 @@ def test_frame_shape_mismatch_degrades_to_zero() -> None:
 
 
 def test_frozen_camera_degrades_within_n_frames() -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(static_scene_frame_count=3))
+    policy = _policy(static_scene_frame_count=3)
     frame = _textured_gray_image()
     cmd = _forward_cmd()
 
@@ -196,7 +206,7 @@ def test_frozen_camera_degrades_within_n_frames() -> None:
 
 
 def test_reset_clears_static_scene_counter() -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(static_scene_frame_count=2))
+    policy = _policy(static_scene_frame_count=2)
     frame = _textured_gray_image()
     cmd = _forward_cmd()
 
@@ -243,7 +253,7 @@ def test_bad_previous_or_current_roi_fail_closes(
     bad_frame_kind: str,
     expected_reason: str,
 ) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
 
     if bad_frame_kind == "black":
         bad_image = _uniform_gray_image(0)
@@ -271,8 +281,26 @@ def test_bad_previous_or_current_roi_fail_closes(
     assert decision.publish_immediately is True
 
 
+@pytest.mark.parametrize(
+    ("mean_flow_magnitude", "expected_level"),
+    [
+        pytest.param(0.0, RiskLevel.CLEAR, id="zero_flow"),
+        pytest.param(0.79, RiskLevel.CLEAR, id="just_below_caution"),
+        pytest.param(0.8, RiskLevel.CAUTION, id="at_caution_threshold"),
+        pytest.param(1.49, RiskLevel.CAUTION, id="just_below_stop"),
+        pytest.param(1.5, RiskLevel.STOP, id="at_stop_threshold"),
+        pytest.param(3.0, RiskLevel.STOP, id="well_above_stop"),
+    ],
+)
+def test_flow_magnitude_maps_to_risk_level(
+    mean_flow_magnitude: float,
+    expected_level: RiskLevel,
+) -> None:
+    assert _policy()._risk_level(mean_flow_magnitude) == expected_level
+
+
 def test_caution_hysteresis_reaches_clamp(image_pair: tuple[Image, Image], mocker) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
     mocker.patch.object(
         policy,
         "_mean_flow_magnitude",
@@ -298,31 +326,10 @@ def test_caution_hysteresis_reaches_clamp(image_pair: tuple[Image, Image], mocke
     assert second.cmd_vel.linear.x == pytest.approx(0.1)
 
 
-def test_first_stop_strength_frame_clamps_immediately(
-    image_pair: tuple[Image, Image], mocker
-) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
-    cmd = _forward_cmd(0.45, angular_z=0.55)
-
-    mocker.patch.object(policy, "_mean_flow_magnitude", return_value=1.8)
-
-    decision = policy.evaluate(
-        previous_image=image_pair[0],
-        current_image=image_pair[1],
-        incoming_cmd_vel=cmd,
-        health=_fresh_health(),
-    )
-
-    assert decision.state == GuardrailState.CLAMP
-    assert decision.reason == "forward_flow_clamp"
-    assert decision.cmd_vel.linear.x == pytest.approx(0.1)
-    assert decision.cmd_vel.angular.z == pytest.approx(cmd.angular.z)
-
-
 def test_repeated_stop_strength_frames_reach_stop_latched(
     image_pair: tuple[Image, Image], mocker
 ) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+    policy = _policy()
     cmd = _forward_cmd(0.45, angular_z=0.55)
 
     mocker.patch.object(
@@ -352,96 +359,10 @@ def test_repeated_stop_strength_frames_reach_stop_latched(
     assert second.cmd_vel.angular.z == pytest.approx(cmd.angular.z)
 
 
-def test_stop_latched_does_not_release_on_first_clear_frame(
-    image_pair: tuple[Image, Image], mocker
-) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
-
-    mocker.patch.object(
-        policy,
-        "_mean_flow_magnitude",
-        side_effect=[1.8, 1.8, 0.0],
-    )
-
-    states = [
-        policy.evaluate(
-            previous_image=image_pair[0],
-            current_image=image_pair[1],
-            incoming_cmd_vel=_forward_cmd(),
-            health=_fresh_health(),
-        ).state
-        for _ in range(3)
-    ]
-
-    assert states == [
-        GuardrailState.CLAMP,
-        GuardrailState.STOP_LATCHED,
-        GuardrailState.STOP_LATCHED,
-    ]
-
-
-def test_stop_latched_recovery_requires_clear_frames(
-    image_pair: tuple[Image, Image], mocker
-) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(clear_frame_count=3))
-
-    mocker.patch.object(
-        policy,
-        "_mean_flow_magnitude",
-        side_effect=[1.8, 1.8, 0.0, 0.0, 0.0],
-    )
-
-    states = [
-        policy.evaluate(
-            previous_image=image_pair[0],
-            current_image=image_pair[1],
-            incoming_cmd_vel=_forward_cmd(),
-            health=_fresh_health(),
-        ).state
-        for _ in range(5)
-    ]
-
-    assert states[0] == GuardrailState.CLAMP
-    assert states[1] == GuardrailState.STOP_LATCHED
-    assert states[2] != GuardrailState.PASS
-    assert states[3] != GuardrailState.PASS
-    assert states[4] == GuardrailState.PASS
-
-
-def test_recovery_after_clear_frames_returns_to_pass(
-    image_pair: tuple[Image, Image], mocker
-) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
-
-    mocker.patch.object(
-        policy,
-        "_mean_flow_magnitude",
-        side_effect=[0.9, 0.9, 0.0, 0.0, 0.0],
-    )
-
-    states = [
-        policy.evaluate(
-            previous_image=image_pair[0],
-            current_image=image_pair[1],
-            incoming_cmd_vel=_forward_cmd(),
-            health=_fresh_health(),
-        ).state
-        for _ in range(5)
-    ]
-
-    assert states == [
-        GuardrailState.PASS,
-        GuardrailState.CLAMP,
-        GuardrailState.CLAMP,
-        GuardrailState.CLAMP,
-        GuardrailState.PASS,
-    ]
-
-
 def test_forward_deadband_does_not_reset_hysteresis(
     image_pair: tuple[Image, Image], mocker
 ) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(caution_frame_count=2))
+    policy = _policy(caution_frame_count=2)
 
     mocker.patch.object(
         policy,
@@ -476,7 +397,7 @@ def test_forward_deadband_does_not_reset_hysteresis(
 
 
 def test_clamp_preserves_angular_terms(image_pair: tuple[Image, Image], mocker) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(caution_frame_count=1))
+    policy = _policy(caution_frame_count=1)
     mocker.patch.object(policy, "_mean_flow_magnitude", return_value=0.9)
     cmd = _forward_cmd(0.4, linear_y=0.15, linear_z=-0.1, angular_z=0.65)
 
@@ -495,7 +416,7 @@ def test_clamp_preserves_angular_terms(image_pair: tuple[Image, Image], mocker) 
 
 
 def test_stop_zeroes_only_linear_x(image_pair: tuple[Image, Image], mocker) -> None:
-    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(stop_frame_count=1))
+    policy = _policy(stop_frame_count=1)
     mocker.patch.object(policy, "_mean_flow_magnitude", return_value=1.8)
     cmd = _forward_cmd(0.45, linear_y=0.2, linear_z=-0.1, angular_z=0.75)
 

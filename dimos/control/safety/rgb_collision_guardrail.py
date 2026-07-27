@@ -22,14 +22,15 @@ from typing import Any, Self
 from pydantic import Field, model_validator
 from reactivex.disposable import CompositeDisposable, Disposable
 
+from dimos.control.safety.guardrail_hysteresis import HysteresisConfig, RiskHysteresis
 from dimos.control.safety.guardrail_policy import (
     GuardrailDecision,
     GuardrailHealth,
     GuardrailPolicy,
-    GuardrailState,
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
 )
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
@@ -166,13 +167,17 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             occlusion_extreme_fraction_threshold=self.config.occlusion_extreme_fraction_threshold,
             caution_flow_magnitude_threshold=self.config.caution_flow_magnitude_threshold,
             stop_flow_magnitude_threshold=self.config.stop_flow_magnitude_threshold,
-            caution_frame_count=self.config.caution_frame_count,
-            stop_frame_count=self.config.stop_frame_count,
-            clear_frame_count=self.config.clear_frame_count,
-            stop_release_frame_count=self.config.stop_release_frame_count,
             static_scene_frame_count=self.config.static_scene_frame_count,
         )
-        return OpticalFlowMagnitudeGuardrailPolicy(policy_config)
+        hysteresis = RiskHysteresis(
+            HysteresisConfig(
+                caution_frame_count=self.config.caution_frame_count,
+                stop_frame_count=self.config.stop_frame_count,
+                clear_frame_count=self.config.clear_frame_count,
+                stop_release_frame_count=self.config.stop_release_frame_count,
+            )
+        )
+        return OpticalFlowMagnitudeGuardrailPolicy(policy_config, hysteresis)
 
     @rpc
     def start(self) -> None:
