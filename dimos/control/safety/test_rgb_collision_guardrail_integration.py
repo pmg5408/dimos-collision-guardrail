@@ -23,9 +23,7 @@ from typing import TypeVar
 import numpy as np
 import pytest
 
-from dimos.control.safety.guardrail_policy import (
-    GuardrailState,
-)
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
 from dimos.control.safety.test_utils import (
     FakeTransport,

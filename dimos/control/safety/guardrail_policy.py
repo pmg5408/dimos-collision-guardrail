@@ -15,25 +15,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Protocol, cast
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image
 
 GrayImage = NDArray[np.uint8]
-
-
-class GuardrailState(str, Enum):
-    INIT = "init"
-    PASS = "pass"
-    CLAMP = "clamp"
-    STOP_LATCHED = "stop_latched"
-    SENSOR_DEGRADED = "sensor_degraded"
 
 
 @dataclass(frozen=True)

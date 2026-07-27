@@ -22,8 +22,8 @@ import numpy as np
 from dimos.control.safety.guardrail_policy import (
     GuardrailDecision,
     GuardrailHealth,
-    GuardrailState,
 )
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.core.stream import Out, Transport
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat

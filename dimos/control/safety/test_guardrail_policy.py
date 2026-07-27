@@ -19,10 +19,10 @@ import pytest
 
 from dimos.control.safety.guardrail_policy import (
     GuardrailHealth,
-    GuardrailState,
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
 )
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.control.safety.test_utils import (
     _textured_gray_image,
 )

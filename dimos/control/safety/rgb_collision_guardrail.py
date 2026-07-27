@@ -26,10 +26,10 @@ from dimos.control.safety.guardrail_policy import (
     GuardrailDecision,
     GuardrailHealth,
     GuardrailPolicy,
-    GuardrailState,
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
 )
+from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
