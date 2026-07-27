@@ -78,6 +78,7 @@ class OpticalFlowMagnitudePolicyConfig:
     stop_frame_count: int
     clear_frame_count: int
     stop_release_frame_count: int
+    static_scene_frame_count: int
 
 
 class GuardrailPolicy(Protocol):
@@ -88,6 +89,8 @@ class GuardrailPolicy(Protocol):
         incoming_cmd_vel: Twist,
         health: GuardrailHealth,
     ) -> GuardrailDecision: ...
+
+    def reset(self) -> None: ...
 
 
 class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
@@ -110,6 +113,7 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
         self._stop_hits = 0
         self._clear_hits = 0
         self._below_stop_hits = 0
+        self._static_frame_hits = 0
 
     def evaluate(
         self,
@@ -148,7 +152,18 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
         if forward_speed <= self._config.forward_motion_deadband_mps:
             return self._pass_decision(incoming_cmd_vel, "forward_guard_inactive", 0.0)
 
-        previous_gray, current_gray = self._prepare_gray_pair(previous_image, current_image)
+        previous_gray = self._to_resized_gray(previous_image)
+        current_gray = self._to_resized_gray(current_image)
+
+        if previous_gray.shape != current_gray.shape:
+            self._reset_hysteresis()
+            return self._zero_decision(
+                GuardrailState.SENSOR_DEGRADED,
+                "frame_shape_mismatch",
+                risk_score=1.0,
+                publish_immediately=True,
+            )
+
         previous_roi, current_roi = self._extract_forward_rois(previous_gray, current_gray)
 
         if previous_roi.size == 0 or current_roi.size == 0:
@@ -169,6 +184,19 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
                 risk_score=1.0,
                 publish_immediately=True,
             )
+
+        if np.array_equal(previous_roi, current_roi):
+            self._static_frame_hits += 1
+            if self._static_frame_hits >= self._config.static_scene_frame_count:
+                self._reset_hysteresis()
+                return self._zero_decision(
+                    GuardrailState.SENSOR_DEGRADED,
+                    "static_scene",
+                    risk_score=1.0,
+                    publish_immediately=True,
+                )
+        else:
+            self._static_frame_hits = 0
 
         mean_flow_magnitude = self._mean_flow_magnitude(previous_roi, current_roi)
         next_state = self._next_state(mean_flow_magnitude)
@@ -199,21 +227,9 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
             mean_flow_magnitude,
         )
 
-    def _prepare_gray_pair(
-        self,
-        previous_image: Image,
-        current_image: Image,
-    ) -> tuple[GrayImage, GrayImage]:
-        previous_gray = self._to_resized_gray(previous_image)
-        current_gray = self._to_resized_gray(current_image)
-
-        shared_height = min(previous_gray.shape[0], current_gray.shape[0])
-        shared_width = min(previous_gray.shape[1], current_gray.shape[1])
-
-        return (
-            np.ascontiguousarray(previous_gray[:shared_height, :shared_width]),
-            np.ascontiguousarray(current_gray[:shared_height, :shared_width]),
-        )
+    def reset(self) -> None:
+        self._reset_hysteresis()
+        self._static_frame_hits = 0
 
     def _to_resized_gray(self, image: Image) -> GrayImage:
         gray = cast("GrayImage", image.to_grayscale().data)

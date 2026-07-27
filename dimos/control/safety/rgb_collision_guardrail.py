@@ -20,7 +20,7 @@ import time
 from typing import Any, Self
 
 from pydantic import Field, model_validator
-from reactivex.disposable import Disposable
+from reactivex.disposable import CompositeDisposable, Disposable
 
 from dimos.control.safety.guardrail_policy import (
     GuardrailDecision,
@@ -79,6 +79,7 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     stop_frame_count: int = Field(default=2, ge=1)
     clear_frame_count: int = Field(default=3, ge=1)
     stop_release_frame_count: int = Field(default=2, ge=1)
+    static_scene_frame_count: int = Field(default=3, ge=1)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> Self:
@@ -169,16 +170,25 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             stop_frame_count=self.config.stop_frame_count,
             clear_frame_count=self.config.clear_frame_count,
             stop_release_frame_count=self.config.stop_release_frame_count,
+            static_scene_frame_count=self.config.static_scene_frame_count,
         )
         return OpticalFlowMagnitudeGuardrailPolicy(policy_config)
 
     @rpc
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("RGB guardrail is already running")
+
         super().start()
         self._stop_event.clear()
 
+        self._disposables.dispose()
+        self._disposables = CompositeDisposable()
+
         with self._condition:
+            self._runtime_state = _GuardrailRuntimeState()
             self._runtime_state.next_risk_time = time.monotonic()
+        self._policy.reset()
 
         self._disposables.add(Disposable(self.color_image.subscribe(self._on_color_image)))
         self._disposables.add(
@@ -208,9 +218,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         with self._condition:
             self._condition.notify_all()
 
-        if self.config.publish_zero_on_stop:
-            self.safe_cmd_vel.publish(Twist.zero())
-
         if self._thread is not None:
             self._thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
             if self._thread.is_alive():
@@ -219,6 +226,9 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                     timeout_s=_THREAD_JOIN_TIMEOUT_S,
                 )
             self._thread = None
+
+        if self.config.publish_zero_on_stop:
+            self.safe_cmd_vel.publish(Twist.zero())
 
         logger.info("RGB guardrail stopped")
         super().stop()
@@ -305,7 +315,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                 if cmd_vel_to_publish is not None:
                     publish_time = now
 
-            if cmd_vel_to_publish is not None and publish_time is not None:
+            if (
+                cmd_vel_to_publish is not None
+                and publish_time is not None
+                and not self._stop_event.is_set()
+            ):
                 self.safe_cmd_vel.publish(cmd_vel_to_publish)
                 with self._condition:
                     self._runtime_state.last_publish_time = publish_time

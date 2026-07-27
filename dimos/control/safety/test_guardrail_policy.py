@@ -36,6 +36,7 @@ def _policy_config(
     stop_frame_count: int = 2,
     clear_frame_count: int = 3,
     stop_release_frame_count: int = 2,
+    static_scene_frame_count: int = 3,
 ) -> OpticalFlowMagnitudePolicyConfig:
     return OpticalFlowMagnitudePolicyConfig(
         forward_motion_deadband_mps=0.05,
@@ -54,6 +55,7 @@ def _policy_config(
         stop_frame_count=stop_frame_count,
         clear_frame_count=clear_frame_count,
         stop_release_frame_count=stop_release_frame_count,
+        static_scene_frame_count=static_scene_frame_count,
     )
 
 
@@ -152,6 +154,66 @@ def test_stale_image_health_degrades_to_zero(image_pair: tuple[Image, Image]) ->
     assert decision.reason == "image_not_fresh"
     assert decision.cmd_vel == Twist.zero()
     assert decision.publish_immediately is True
+
+
+def test_frame_shape_mismatch_degrades_to_zero() -> None:
+    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config())
+
+    decision = policy.evaluate(
+        previous_image=_textured_gray_image(width=160, height=120),
+        current_image=_textured_gray_image(width=160, height=90),
+        incoming_cmd_vel=_forward_cmd(),
+        health=_fresh_health(),
+    )
+
+    assert decision.state == GuardrailState.SENSOR_DEGRADED
+    assert decision.reason == "frame_shape_mismatch"
+    assert decision.cmd_vel == Twist.zero()
+    assert decision.publish_immediately is True
+
+
+def test_frozen_camera_degrades_within_n_frames() -> None:
+    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(static_scene_frame_count=3))
+    frame = _textured_gray_image()
+    cmd = _forward_cmd()
+
+    decisions = [
+        policy.evaluate(
+            previous_image=frame,
+            current_image=frame,
+            incoming_cmd_vel=cmd,
+            health=_fresh_health(),
+        )
+        for _ in range(5)
+    ]
+
+    assert all(d.state == GuardrailState.PASS for d in decisions[:2])
+    for decision in decisions[2:]:
+        assert decision.state == GuardrailState.SENSOR_DEGRADED
+        assert decision.reason == "static_scene"
+        assert decision.cmd_vel == Twist.zero()
+        assert decision.publish_immediately is True
+
+
+def test_reset_clears_static_scene_counter() -> None:
+    policy = OpticalFlowMagnitudeGuardrailPolicy(_policy_config(static_scene_frame_count=2))
+    frame = _textured_gray_image()
+    cmd = _forward_cmd()
+
+    def evaluate_identical() -> GuardrailState:
+        return policy.evaluate(
+            previous_image=frame,
+            current_image=frame,
+            incoming_cmd_vel=cmd,
+            health=_fresh_health(),
+        ).state
+
+    assert evaluate_identical() == GuardrailState.PASS
+    assert evaluate_identical() == GuardrailState.SENSOR_DEGRADED
+
+    policy.reset()
+
+    assert evaluate_identical() == GuardrailState.PASS
 
 
 @pytest.mark.parametrize(
