@@ -168,13 +168,15 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     _hysteresis: RiskHysteresis
     _static_frame_hits: int
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, policy_override: GuardrailPolicy | None = None, **kwargs: Any) -> None:
+        """Build the guardrail, optionally supplying the detector.
+        """
         super().__init__(**kwargs)
         self._condition = Condition()
         self._runtime_state = _GuardrailRuntimeState()
         self._stop_event = Event()
         self._thread = None
-        self._policy = self._build_policy()
+        self._policy = policy_override if policy_override is not None else self._build_policy()
         self._hysteresis = self._build_hysteresis()
         self._static_frame_hits = 0
 

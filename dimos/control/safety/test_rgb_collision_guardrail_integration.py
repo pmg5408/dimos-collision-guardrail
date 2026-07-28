@@ -23,11 +23,7 @@ from typing import TypeVar
 import numpy as np
 import pytest
 
-from dimos.control.safety.guardrail_hysteresis import (
-    HysteresisConfig,
-    RiskHysteresis,
-    RiskLevel,
-)
+from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
 from dimos.control.safety.test_utils import (
     FakeTransport,
@@ -50,6 +46,7 @@ def _black_gray_image(*, width: int = 160, height: int = 120) -> Image:
 
 
 def _start_guardrail(
+    policy: Any | None = None,
     **config_overrides: float,
 ) -> tuple[
     RGBCollisionGuardrail,
@@ -64,7 +61,7 @@ def _start_guardrail(
     }
     config.update(config_overrides)
 
-    guardrail = RGBCollisionGuardrail(**config)
+    guardrail = RGBCollisionGuardrail(policy_override=policy, **config)
     image_transport: FakeTransport[Image] = FakeTransport()
     cmd_transport: FakeTransport[Twist] = FakeTransport()
     outputs: queue.Queue[tuple[float, Twist]] = queue.Queue()
@@ -135,23 +132,15 @@ def test_stream_wiring_end_to_end_passes_upstream_twist(
 @pytest.mark.slow
 def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
+        SequencePolicy([_assessment(RiskLevel.CAUTION)]),
         decision_hz=20.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
+        caution_frame_count=1,
     )
     guarded = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
     try:
-        guardrail._policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
-        guardrail._hysteresis = RiskHysteresis(
-            HysteresisConfig(
-                caution_frame_count=1,
-                stop_frame_count=2,
-                clear_frame_count=3,
-                stop_release_frame_count=2,
-            )
-        )
-
         cmd_transport.publish(_cmd(0.4, angular_z=0.2))
         image_transport.publish(_textured_gray_image())
         image_transport.publish(_textured_gray_image(shift_x=2))
@@ -176,9 +165,11 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
 @pytest.mark.slow
 def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
+        SequencePolicy([_assessment(RiskLevel.STOP)]),
         decision_hz=30.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
+        stop_frame_count=1,
     )
     stop_cmd = Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
@@ -210,16 +201,6 @@ def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() ->
             errors.append(exc)
 
     try:
-        guardrail._policy = SequencePolicy([_assessment(RiskLevel.STOP)])
-        guardrail._hysteresis = RiskHysteresis(
-            HysteresisConfig(
-                caution_frame_count=2,
-                stop_frame_count=1,
-                clear_frame_count=3,
-                stop_release_frame_count=2,
-            )
-        )
-
         image_thread = threading.Thread(target=publish_images, daemon=True)
         cmd_thread = threading.Thread(target=publish_commands, daemon=True)
 

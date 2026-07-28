@@ -24,6 +24,7 @@ import pytest
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
+    OpticalFlowMagnitudeGuardrailPolicy,
     RiskAssessment,
     RiskResult,
     RiskUnavailable,
@@ -132,7 +133,7 @@ def _start_threaded_guardrail(
     }
     config.update(config_overrides)
 
-    guardrail = RGBCollisionGuardrail(**config)
+    guardrail = RGBCollisionGuardrail(policy_override=policy, **config)
     image_transport: FakeTransport[Image] = FakeTransport()
     cmd_transport: FakeTransport[Twist] = FakeTransport()
     outputs: queue.Queue[Twist] = queue.Queue()
@@ -140,7 +141,6 @@ def _start_threaded_guardrail(
     guardrail.color_image.transport = image_transport
     guardrail.incoming_cmd_vel.transport = cmd_transport
     guardrail.safe_cmd_vel.subscribe(outputs.put)
-    guardrail._policy = policy
     guardrail.start()
 
     return guardrail, image_transport, cmd_transport, outputs
@@ -236,6 +236,25 @@ def test_invalid_inputs_fail_closed_with_a_named_reason(
 
 def test_valid_inputs_are_not_rejected(module: RGBCollisionGuardrail) -> None:
     assert module._input_failure_decision(_valid_snapshot()) is None
+
+
+def test_config_builds_the_default_detector() -> None:
+    guardrail = RGBCollisionGuardrail()
+
+    try:
+        assert isinstance(guardrail._policy, OpticalFlowMagnitudeGuardrailPolicy)
+    finally:
+        guardrail._close_module()
+
+
+def test_policy_override_replaces_the_configured_detector() -> None:
+    policy = CountingPassPolicy()
+    guardrail = RGBCollisionGuardrail(policy_override=policy)
+
+    try:
+        assert guardrail._policy is policy
+    finally:
+        guardrail._close_module()
 
 
 @pytest.mark.parametrize(
