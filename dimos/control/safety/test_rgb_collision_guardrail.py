@@ -124,9 +124,9 @@ def _wait_for_decision(
 
 def _start_threaded_guardrail(
     policy: Any,
-    **config_overrides: float,
+    **config_overrides: Any,
 ) -> tuple[RGBCollisionGuardrail, FakeTransport[Image], FakeTransport[Twist], queue.Queue[Twist]]:
-    config: dict[str, float] = {
+    config: dict[str, Any] = {
         "decision_hz": 50.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
@@ -526,7 +526,7 @@ def test_held_state_tracks_newer_commands_without_a_new_frame_pair() -> None:
     policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        caution_frame_count=1,
+        hysteresis={"caution_frame_count": 1},
         command_timeout_s=5.0,
         image_timeout_s=5.0,
     )
@@ -596,7 +596,7 @@ def test_non_pass_states_publish_guarded_output(
     policy = SequencePolicy([_assessment(level)])
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        **frame_counts,
+        hysteresis=frame_counts,
     )
 
     try:
@@ -616,7 +616,7 @@ def test_non_pass_heartbeat_republishes_guarded_output() -> None:
     policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        caution_frame_count=1,
+        hysteresis={"caution_frame_count": 1},
     )
 
     try:
@@ -644,7 +644,7 @@ def test_non_pass_decision_can_publish_without_new_command() -> None:
     )
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        stop_frame_count=1,
+        hysteresis={"stop_frame_count": 1},
     )
 
     try:
@@ -749,7 +749,7 @@ def test_restart_resets_runtime_state() -> None:
     policy = SequencePolicy([_assessment(RiskLevel.STOP)])
     guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
         policy,
-        stop_frame_count=1,
+        hysteresis={"stop_frame_count": 1},
     )
 
     try:

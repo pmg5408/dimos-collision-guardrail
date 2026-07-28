@@ -20,7 +20,7 @@ import time
 from typing import Any, Self
 
 import numpy as np
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from reactivex.disposable import CompositeDisposable, Disposable
 
 from dimos.control.safety.guardrail_hysteresis import (
@@ -51,6 +51,10 @@ logger = setup_logger()
 
 
 class RGBCollisionGuardrailConfig(ModuleConfig):
+    # Reject unknown keys: a stale or mistyped setting is otherwise dropped in
+    # silence and the guardrail runs on defaults nobody chose.
+    model_config = ConfigDict(extra="forbid")
+
     # Scheduling
     decision_hz: float = Field(default=10.0, gt=0.0)
 
@@ -77,14 +81,12 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     occlusion_bright_pixel_threshold: int = Field(default=235, ge=0, le=255)
     occlusion_extreme_fraction_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
 
-    # Flow thresholds and hysteresis
+    # Flow thresholds
     caution_flow_magnitude_threshold: float = Field(default=0.8, ge=0.0)
     stop_flow_magnitude_threshold: float = Field(default=1.5, ge=0.0)
-    caution_frame_count: int = Field(default=2, ge=1)
-    stop_frame_count: int = Field(default=2, ge=1)
-    clear_frame_count: int = Field(default=3, ge=1)
-    stop_release_frame_count: int = Field(default=2, ge=1)
     static_scene_frame_count: int = Field(default=3, ge=1)
+
+    hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> Self:
@@ -177,18 +179,8 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._stop_event = Event()
         self._thread = None
         self._policy = policy_override if policy_override is not None else self._build_policy()
-        self._hysteresis = self._build_hysteresis()
+        self._hysteresis = RiskHysteresis(self.config.hysteresis)
         self._static_frame_hits = 0
-
-    def _build_hysteresis(self) -> RiskHysteresis:
-        return RiskHysteresis(
-            HysteresisConfig(
-                caution_frame_count=self.config.caution_frame_count,
-                stop_frame_count=self.config.stop_frame_count,
-                clear_frame_count=self.config.clear_frame_count,
-                stop_release_frame_count=self.config.stop_release_frame_count,
-            )
-        )
 
     def _build_policy(self) -> GuardrailPolicy:
         policy_config = OpticalFlowMagnitudePolicyConfig(
