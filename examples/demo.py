@@ -44,13 +44,11 @@ def main() -> None:
     base = _texture()
 
     guardrail = RGBCollisionGuardrail(
-        risk_evaluation_hz=10.0,
-        guarded_output_publish_hz=10.0,
+        decision_hz=10.0,
         # Generous freshness windows: this demo is about the flow -> hysteresis
         # ladder, not the staleness fail-closed paths (those have their own tests).
         command_timeout_s=1.0,
         image_timeout_s=1.0,
-        risk_timeout_s=1.0,
         frame_pair_max_gap_s=1.0,
     )
 

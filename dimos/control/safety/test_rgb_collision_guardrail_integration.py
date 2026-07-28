@@ -34,7 +34,6 @@ from dimos.control.safety.test_utils import (
     SequencePolicy,
     _assessment,
     _cmd,
-    _decision,
     _textured_gray_image,
 )
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -59,11 +58,9 @@ def _start_guardrail(
     queue.Queue[tuple[float, Twist]],
 ]:
     config: dict[str, float] = {
-        "guarded_output_publish_hz": 20.0,
-        "risk_evaluation_hz": 20.0,
+        "decision_hz": 20.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
-        "risk_timeout_s": 0.3,
     }
     config.update(config_overrides)
 
@@ -138,11 +135,9 @@ def test_stream_wiring_end_to_end_passes_upstream_twist(
 @pytest.mark.slow
 def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
-        guarded_output_publish_hz=20.0,
-        risk_evaluation_hz=20.0,
+        decision_hz=20.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
-        risk_timeout_s=0.5,
     )
     guarded = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
@@ -171,7 +166,7 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
         assert msg2 == guarded
 
         interval = t2 - t1
-        expected_period = 1.0 / guardrail.config.guarded_output_publish_hz
+        expected_period = 1.0 / guardrail.config.decision_hz
 
         assert expected_period * 0.5 <= interval <= expected_period * 2.0
     finally:
@@ -181,11 +176,9 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
 @pytest.mark.slow
 def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
-        guarded_output_publish_hz=30.0,
-        risk_evaluation_hz=30.0,
+        decision_hz=30.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
-        risk_timeout_s=0.5,
     )
     stop_cmd = Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
@@ -280,11 +273,9 @@ def test_black_frame_end_to_end_fail_closes_to_zero(
 @pytest.mark.slow
 def test_stale_image_end_to_end_fail_closes_without_new_command() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
-        guarded_output_publish_hz=25.0,
-        risk_evaluation_hz=25.0,
+        decision_hz=25.0,
         command_timeout_s=0.5,
         image_timeout_s=0.08,
-        risk_timeout_s=0.5,
     )
     # Keep the initial command below deadband so this test is about
     # autonomous stale-image fail-close, not optical-flow threshold tuning.

@@ -21,7 +21,6 @@ import numpy as np
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import RiskAssessment, RiskResult
-from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
 from dimos.core.stream import Out, Transport
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
@@ -96,16 +95,3 @@ def _assessment(level: RiskLevel, score: float = 0.0) -> RiskAssessment:
     return RiskAssessment(level=level, score=score)
 
 
-def _decision(
-    state: GuardrailState,
-    cmd_vel: Twist,
-    *,
-    reason: str = "test",
-    publish_immediately: bool = False,
-) -> GuardrailDecision:
-    return GuardrailDecision(
-        state=state,
-        cmd_vel=cmd_vel,
-        reason=reason,
-        publish_immediately=publish_immediately,
-    )

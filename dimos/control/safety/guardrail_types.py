@@ -36,4 +36,3 @@ class GuardrailDecision:
     cmd_vel: Twist
     reason: str
     risk_score: float = 0.0
-    publish_immediately: bool = False

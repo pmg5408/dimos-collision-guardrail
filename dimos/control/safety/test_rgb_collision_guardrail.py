@@ -29,13 +29,15 @@ from dimos.control.safety.guardrail_policy import (
     RiskUnavailable,
 )
 from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
-from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
+from dimos.control.safety.rgb_collision_guardrail import (
+    RGBCollisionGuardrail,
+    _InputSnapshot,
+)
 from dimos.control.safety.test_utils import (
     FakeTransport,
     SequencePolicy,
     _assessment,
     _cmd,
-    _decision,
     _textured_gray_image,
 )
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -76,11 +78,9 @@ class CountingPassPolicy:
 @pytest.fixture
 def module() -> Iterator[RGBCollisionGuardrail]:
     guardrail = RGBCollisionGuardrail(
-        guarded_output_publish_hz=50.0,
-        risk_evaluation_hz=50.0,
+        decision_hz=50.0,
         command_timeout_s=0.05,
         image_timeout_s=0.05,
-        risk_timeout_s=0.05,
     )
     yield guardrail
     guardrail._close_module()
@@ -126,11 +126,9 @@ def _start_threaded_guardrail(
     **config_overrides: float,
 ) -> tuple[RGBCollisionGuardrail, FakeTransport[Image], FakeTransport[Twist], queue.Queue[Twist]]:
     config: dict[str, float] = {
-        "guarded_output_publish_hz": 50.0,
-        "risk_evaluation_hz": 50.0,
+        "decision_hz": 50.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
-        "risk_timeout_s": 0.3,
     }
     config.update(config_overrides)
 
@@ -148,86 +146,96 @@ def _start_threaded_guardrail(
     return guardrail, image_transport, cmd_transport, outputs
 
 
-def test_no_command_returns_init_zero(module: RGBCollisionGuardrail) -> None:
-    now = time.monotonic()
-
-    with module._condition:
-        decision = module._input_failure_decision_locked(now)
-
-    assert decision is not None
-    assert decision.state == GuardrailState.INIT
-    assert decision.reason == "no_command_received"
-    assert decision.cmd_vel == Twist.zero()
-
-
-def test_waiting_for_first_image_returns_init_zero(module: RGBCollisionGuardrail) -> None:
-    now = time.monotonic()
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = now
-        decision = module._input_failure_decision_locked(now)
-
-    assert decision is not None
-    assert decision.state == GuardrailState.INIT
-    assert decision.reason == "waiting_for_first_image"
-    assert decision.cmd_vel == Twist.zero()
+def _snapshot(
+    *,
+    previous_image: Image | None = None,
+    current_image: Image | None = None,
+    incoming_cmd_vel: Twist | None = None,
+    image_fresh: bool = True,
+    cmd_fresh: bool = True,
+    frame_pair_fresh: bool = True,
+    has_new_frame_pair: bool = True,
+    last_decision: GuardrailDecision | None = None,
+) -> _InputSnapshot:
+    return _InputSnapshot(
+        previous_image=previous_image,
+        current_image=current_image,
+        incoming_cmd_vel=incoming_cmd_vel,
+        image_fresh=image_fresh,
+        cmd_fresh=cmd_fresh,
+        frame_pair_fresh=frame_pair_fresh,
+        has_new_frame_pair=has_new_frame_pair,
+        last_decision=last_decision,
+    )
 
 
-def test_no_frame_pair_returns_init_zero(module: RGBCollisionGuardrail) -> None:
-    now = time.monotonic()
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = now
-        module._runtime_state.latest_image = _textured_gray_image()
-        module._runtime_state.latest_image_time = now
-        decision = module._input_failure_decision_locked(now)
-
-    assert decision is not None
-    assert decision.state == GuardrailState.INIT
-    assert decision.reason == "waiting_for_frame_pair"
-    assert decision.cmd_vel == Twist.zero()
+def _valid_snapshot(**overrides: Any) -> _InputSnapshot:
+    defaults: dict[str, Any] = {
+        "previous_image": _textured_gray_image(),
+        "current_image": _textured_gray_image(shift_x=2),
+        "incoming_cmd_vel": _cmd(0.4),
+    }
+    defaults.update(overrides)
+    return _snapshot(**defaults)
 
 
-def test_waiting_for_first_risk_evaluation_returns_init_zero(
+@pytest.mark.parametrize(
+    ("snapshot", "expected_state", "expected_reason"),
+    [
+        pytest.param(
+            _snapshot(),
+            GuardrailState.INIT,
+            "no_command_received",
+            id="no_command",
+        ),
+        pytest.param(
+            _snapshot(incoming_cmd_vel=_cmd()),
+            GuardrailState.INIT,
+            "waiting_for_first_image",
+            id="no_image",
+        ),
+        pytest.param(
+            _snapshot(incoming_cmd_vel=_cmd(), current_image=_textured_gray_image()),
+            GuardrailState.INIT,
+            "waiting_for_frame_pair",
+            id="no_frame_pair",
+        ),
+        pytest.param(
+            _valid_snapshot(image_fresh=False),
+            GuardrailState.SENSOR_DEGRADED,
+            "image_stale",
+            id="stale_image",
+        ),
+        pytest.param(
+            _valid_snapshot(frame_pair_fresh=False),
+            GuardrailState.SENSOR_DEGRADED,
+            "frame_pair_stale",
+            id="frame_pair_gap",
+        ),
+        pytest.param(
+            _valid_snapshot(current_image=_textured_gray_image(height=90)),
+            GuardrailState.SENSOR_DEGRADED,
+            "frame_shape_mismatch",
+            id="shape_mismatch",
+        ),
+    ],
+)
+def test_invalid_inputs_fail_closed_with_a_named_reason(
     module: RGBCollisionGuardrail,
+    snapshot: _InputSnapshot,
+    expected_state: GuardrailState,
+    expected_reason: str,
 ) -> None:
-    now = time.monotonic()
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = now
-        module._runtime_state.previous_image = _textured_gray_image()
-        module._runtime_state.previous_image_time = now
-        module._runtime_state.latest_image = _textured_gray_image(shift_x=2)
-        module._runtime_state.latest_image_time = now
-        module._runtime_state.last_risk_time = None
-        decision = module._risk_staleness_decision_locked(now)
+    decision = module._input_failure_decision(snapshot)
 
     assert decision is not None
-    assert decision.state == GuardrailState.INIT
-    assert decision.reason == "waiting_for_first_risk_evaluation"
+    assert decision.state == expected_state
+    assert decision.reason == expected_reason
     assert decision.cmd_vel == Twist.zero()
 
 
-def test_stale_image_returns_sensor_degraded_zero(module: RGBCollisionGuardrail) -> None:
-    now = time.monotonic()
-    stale_time = now - 0.2
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = now
-        module._runtime_state.previous_image = _textured_gray_image()
-        module._runtime_state.latest_image = _textured_gray_image(shift_x=2)
-        module._runtime_state.previous_image_time = stale_time
-        module._runtime_state.latest_image_time = stale_time
-        decision = module._input_failure_decision_locked(now)
-
-    assert decision is not None
-    assert decision.state == GuardrailState.SENSOR_DEGRADED
-    assert decision.reason == "image_stale"
-    assert decision.cmd_vel == Twist.zero()
+def test_valid_inputs_are_not_rejected(module: RGBCollisionGuardrail) -> None:
+    assert module._input_failure_decision(_valid_snapshot()) is None
 
 
 @pytest.mark.parametrize(
@@ -236,12 +244,10 @@ def test_stale_image_returns_sensor_degraded_zero(module: RGBCollisionGuardrail)
         pytest.param(_cmd(0.03, angular_z=0.35), id="below_forward_deadband"),
         pytest.param(_cmd(-0.2, angular_z=0.4), id="reverse_motion"),
         pytest.param(Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.6]), id="pure_yaw"),
+        pytest.param(None, id="no_command"),
     ],
 )
-def test_forward_motion_not_commanded_below_deadband(
-    module: RGBCollisionGuardrail,
-    cmd: Twist,
-) -> None:
+def test_forward_motion_not_commanded(module: RGBCollisionGuardrail, cmd: Twist | None) -> None:
     assert module._forward_motion_commanded(cmd) is False
 
 
@@ -249,63 +255,70 @@ def test_forward_motion_commanded_above_deadband(module: RGBCollisionGuardrail) 
     assert module._forward_motion_commanded(_cmd(0.4)) is True
 
 
-def test_clamp_limits_forward_speed_and_preserves_angular(
-    module: RGBCollisionGuardrail,
-) -> None:
+def test_pass_state_forwards_the_command_untouched(module: RGBCollisionGuardrail) -> None:
     incoming = _cmd(0.5, angular_z=0.42)
 
-    decision = module._build_clamp_decision(incoming, "risk_clamp", 1.0)
-
-    assert decision.state == GuardrailState.CLAMP
-    assert decision.cmd_vel.linear.x == pytest.approx(module.config.clamp_forward_speed_mps)
-    assert decision.cmd_vel.angular.z == pytest.approx(0.42)
+    assert module._command_for_state(GuardrailState.PASS, _valid_snapshot(incoming_cmd_vel=incoming)) == incoming
 
 
-def test_clamp_does_not_raise_a_slower_forward_speed(module: RGBCollisionGuardrail) -> None:
-    slower_than_clamp = module.config.clamp_forward_speed_mps / 2.0
-
-    decision = module._build_clamp_decision(_cmd(slower_than_clamp), "risk_clamp", 1.0)
-
-    assert decision.cmd_vel.linear.x == pytest.approx(slower_than_clamp)
-
-
-def test_stop_zeroes_forward_speed_and_preserves_angular(
+def test_clamp_state_limits_forward_speed_and_preserves_angular(
     module: RGBCollisionGuardrail,
 ) -> None:
-    decision = module._build_stop_decision(_cmd(0.5, angular_z=0.42), "risk_stop", 1.0)
+    snapshot = _valid_snapshot(incoming_cmd_vel=_cmd(0.5, angular_z=0.42))
 
-    assert decision.state == GuardrailState.STOP_LATCHED
-    assert decision.cmd_vel.linear.x == pytest.approx(0.0)
-    assert decision.cmd_vel.angular.z == pytest.approx(0.42)
+    cmd_vel = module._command_for_state(GuardrailState.CLAMP, snapshot)
+
+    assert cmd_vel.linear.x == pytest.approx(module.config.clamp_forward_speed_mps)
+    assert cmd_vel.angular.z == pytest.approx(0.42)
+
+
+def test_clamp_state_does_not_raise_a_slower_forward_speed(
+    module: RGBCollisionGuardrail,
+) -> None:
+    slower_than_clamp = module.config.clamp_forward_speed_mps / 2.0
+    snapshot = _valid_snapshot(incoming_cmd_vel=_cmd(slower_than_clamp))
+
+    cmd_vel = module._command_for_state(GuardrailState.CLAMP, snapshot)
+
+    assert cmd_vel.linear.x == pytest.approx(slower_than_clamp)
+
+
+def test_stop_state_zeroes_forward_speed_and_preserves_angular(
+    module: RGBCollisionGuardrail,
+) -> None:
+    snapshot = _valid_snapshot(incoming_cmd_vel=_cmd(0.5, angular_z=0.42))
+
+    cmd_vel = module._command_for_state(GuardrailState.STOP_LATCHED, snapshot)
+
+    assert cmd_vel.linear.x == pytest.approx(0.0)
+    assert cmd_vel.angular.z == pytest.approx(0.42)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [GuardrailState.INIT, GuardrailState.SENSOR_DEGRADED],
+)
+def test_non_gating_states_emit_zero(module: RGBCollisionGuardrail, state: GuardrailState) -> None:
+    assert module._command_for_state(state, _valid_snapshot()) == Twist.zero()
+
+
+def test_stale_command_emits_zero_in_every_state(module: RGBCollisionGuardrail) -> None:
+    snapshot = _valid_snapshot(cmd_fresh=False)
+
+    for state in GuardrailState:
+        assert module._command_for_state(state, snapshot) == Twist.zero()
 
 
 def test_unavailable_assessment_degrades_with_the_reported_reason(
     module: RGBCollisionGuardrail,
 ) -> None:
-    decision = module._decision_from_assessment(RiskUnavailable("current_roi_occluded"), _cmd(0.4))
+    decision = module._decision_from_risk_assessment(
+        RiskUnavailable("current_roi_occluded"),
+        _valid_snapshot(),
+    )
 
     assert decision.state == GuardrailState.SENSOR_DEGRADED
     assert decision.reason == "current_roi_occluded"
-    assert decision.cmd_vel == Twist.zero()
-
-
-def test_frame_shape_mismatch_returns_sensor_degraded_zero(
-    module: RGBCollisionGuardrail,
-) -> None:
-    now = time.monotonic()
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = now
-        module._runtime_state.previous_image = _textured_gray_image(width=160, height=120)
-        module._runtime_state.latest_image = _textured_gray_image(width=160, height=90)
-        module._runtime_state.previous_image_time = now
-        module._runtime_state.latest_image_time = now
-        decision = module._input_failure_decision_locked(now)
-
-    assert decision is not None
-    assert decision.state == GuardrailState.SENSOR_DEGRADED
-    assert decision.reason == "frame_shape_mismatch"
     assert decision.cmd_vel == Twist.zero()
 
 
@@ -313,14 +326,11 @@ def test_frozen_stream_degrades_after_repeated_identical_frames(
     module: RGBCollisionGuardrail,
 ) -> None:
     frame = _textured_gray_image()
+    snapshot = _valid_snapshot(previous_image=frame, current_image=frame)
 
-    with module._condition:
-        module._runtime_state.previous_image = frame
-        module._runtime_state.latest_image = frame
-
-        first = module._frozen_stream_decision_locked()
-        second = module._frozen_stream_decision_locked()
-        third = module._frozen_stream_decision_locked()
+    first = module._frozen_stream_decision(snapshot)
+    second = module._frozen_stream_decision(snapshot)
+    third = module._frozen_stream_decision(snapshot)
 
     assert first is None
     assert second is None
@@ -334,51 +344,13 @@ def test_frozen_stream_counter_resets_when_a_frame_changes(
     module: RGBCollisionGuardrail,
 ) -> None:
     frame = _textured_gray_image()
+    frozen = _valid_snapshot(previous_image=frame, current_image=frame)
 
-    with module._condition:
-        module._runtime_state.previous_image = frame
-        module._runtime_state.latest_image = frame
-        module._frozen_stream_decision_locked()
-        module._frozen_stream_decision_locked()
+    module._frozen_stream_decision(frozen)
+    module._frozen_stream_decision(frozen)
+    module._frozen_stream_decision(_valid_snapshot())
 
-        module._runtime_state.latest_image = _textured_gray_image(shift_x=3)
-        module._frozen_stream_decision_locked()
-
-        assert module._runtime_state.static_frame_hits == 0
-
-
-def test_stale_risk_returns_sensor_degraded_zero(module: RGBCollisionGuardrail) -> None:
-    now = time.monotonic()
-    stale_risk_time = now - 0.2
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = now
-        module._runtime_state.previous_image = _textured_gray_image()
-        module._runtime_state.latest_image = _textured_gray_image(shift_x=2)
-        module._runtime_state.previous_image_time = now
-        module._runtime_state.latest_image_time = now
-        module._runtime_state.last_risk_time = stale_risk_time
-        decision = module._risk_staleness_decision_locked(now)
-
-    assert decision is not None
-    assert decision.state == GuardrailState.SENSOR_DEGRADED
-    assert decision.reason == "risk_state_stale"
-    assert decision.cmd_vel == Twist.zero()
-
-
-def test_stale_command_publishes_zero_output(module: RGBCollisionGuardrail) -> None:
-    now = time.monotonic()
-    stale_cmd_time = now - 0.2
-
-    with module._condition:
-        module._runtime_state.latest_cmd_vel = _cmd()
-        module._runtime_state.latest_cmd_time = stale_cmd_time
-        module._runtime_state.last_decision = _decision(GuardrailState.PASS, _cmd())
-        module._runtime_state.pending_cmd_update = True
-        cmd_to_publish = module._consume_publish_cmd_locked(now)
-
-    assert cmd_to_publish == Twist.zero()
+    assert module._static_frame_hits == 0
 
 
 def test_policy_exception_fail_closes_to_zero() -> None:
@@ -416,7 +388,6 @@ def test_frozen_stream_counter_advances_per_frame_pair_not_per_tick() -> None:
         policy,
         static_scene_frame_count=3,
         image_timeout_s=5.0,
-        risk_timeout_s=5.0,
     )
 
     try:
@@ -427,9 +398,134 @@ def test_frozen_stream_counter_advances_per_frame_pair_not_per_tick() -> None:
 
         time.sleep(0.2)
 
+        assert guardrail._static_frame_hits == 1
         with guardrail._condition:
-            assert guardrail._runtime_state.static_frame_hits == 1
             assert guardrail._runtime_state.state != GuardrailState.SENSOR_DEGRADED
+    finally:
+        guardrail.stop()
+
+
+def test_stop_keeps_the_thread_handle_when_the_join_times_out(mocker) -> None:
+    mocker.patch(
+        "dimos.control.safety.rgb_collision_guardrail._THREAD_JOIN_TIMEOUT_S",
+        0.05,
+    )
+    release = threading.Event()
+
+    class BlockingPolicy:
+        def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
+            release.wait()
+            return RiskAssessment(level=RiskLevel.CLEAR, score=0.0)
+
+        def reset(self) -> None:
+            pass
+
+    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
+        BlockingPolicy(),
+    )
+
+    try:
+        cmd_transport.publish(_cmd(0.4))
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+        time.sleep(0.1)
+
+        guardrail.stop()
+
+        # The worker outlived the join, so a second start() would put two threads on
+        # one output stream. It has to refuse.
+        assert guardrail._thread is not None
+        with pytest.raises(RuntimeError):
+            guardrail.start()
+    finally:
+        release.set()
+        guardrail.stop()
+
+
+def test_command_arriving_during_evaluation_is_not_delayed_to_the_next_tick() -> None:
+    class SlowPolicy:
+        def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
+            time.sleep(0.1)
+            return RiskAssessment(level=RiskLevel.CLEAR, score=0.0)
+
+        def reset(self) -> None:
+            pass
+
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        SlowPolicy(),
+        decision_hz=2.0,
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+
+    try:
+        first = _cmd(0.4, angular_z=0.1)
+        cmd_transport.publish(first)
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+
+        # Land a command while the worker is inside evaluate(). notify() cannot help
+        # here -- nobody is waiting to be notified -- so without the wake flag this
+        # command would sit out the full 500ms tick.
+        time.sleep(0.05)
+        second = _cmd(0.4, angular_z=-0.3)
+        cmd_transport.publish(second)
+        published_at = time.monotonic()
+
+        _wait_for_output(outputs, lambda twist: twist == second, timeout_s=0.4)
+        assert time.monotonic() - published_at < 0.4
+    finally:
+        guardrail.stop()
+
+
+def test_output_continues_at_the_tick_rate_without_new_input() -> None:
+    policy = CountingPassPolicy()
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        policy,
+        decision_hz=50.0,
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+
+    try:
+        upstream = _cmd(0.4)
+        cmd_transport.publish(upstream)
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+
+        _wait_for_output(outputs, lambda twist: twist == upstream)
+
+        # Nothing new is published from here on; the gate must keep emitting so
+        # silence stays a reliable signal that it has died.
+        for _ in range(3):
+            assert _wait_for_output(outputs, lambda twist: twist == upstream) == upstream
+    finally:
+        guardrail.stop()
+
+
+def test_held_state_tracks_newer_commands_without_a_new_frame_pair() -> None:
+    policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        policy,
+        caution_frame_count=1,
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+
+    try:
+        cmd_transport.publish(_cmd(0.4, angular_z=0.2))
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+
+        clamped = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
+        _wait_for_output(outputs, lambda twist: twist == clamped)
+
+        # No new frames arrive, so the state is held -- but the gate must apply it
+        # to the newer command rather than replaying the old output.
+        cmd_transport.publish(_cmd(0.4, angular_z=-0.45))
+
+        reclamped = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, -0.45])
+        assert _wait_for_output(outputs, lambda twist: twist == reclamped) == reclamped
     finally:
         guardrail.stop()
 
@@ -552,11 +648,9 @@ def test_fast_upstream_commands_reuse_last_risk_decision() -> None:
     policy = CountingPassPolicy()
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        guarded_output_publish_hz=100.0,
-        risk_evaluation_hz=2.0,
+        decision_hz=2.0,
         command_timeout_s=1.0,
         image_timeout_s=1.0,
-        risk_timeout_s=1.0,
     )
 
     first_cmd = _cmd(0.20, angular_z=0.10)
