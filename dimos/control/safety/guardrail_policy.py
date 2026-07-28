@@ -21,42 +21,32 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from dimos.control.safety.guardrail_hysteresis import RiskHysteresis, RiskLevel
-from dimos.control.safety.guardrail_types import GuardrailState
-from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.msgs.sensor_msgs.Image import Image
 
 GrayImage = NDArray[np.uint8]
 
 
 @dataclass(frozen=True)
-class GuardrailHealth:
-    has_previous_frame: bool
-    image_fresh: bool
-    cmd_fresh: bool
-    risk_fresh: bool
-    frame_pair_fresh: bool
+class RiskAssessment:
+    """A usable measurement: how alarmed the detector is, and its raw score."""
+
+    level: RiskLevel
+    score: float
 
 
-@dataclass
-class GuardrailDecision:
-    """Policy result consumed by the guardrail worker.
+@dataclass(frozen=True)
+class RiskUnavailable:
+    """The detector cannot measure this frame pair, with a named cause."""
 
-    publish_immediately requests an immediate worker-side publish on the next
-    loop iteration. It does not bypass command freshness checks.
-    """
-
-    state: GuardrailState
-    cmd_vel: Twist
     reason: str
-    risk_score: float = 0.0
-    publish_immediately: bool = False
+
+
+RiskResult = RiskAssessment | RiskUnavailable
 
 
 @dataclass(frozen=True)
 class OpticalFlowMagnitudePolicyConfig:
-    forward_motion_deadband_mps: float
-    clamp_forward_speed_mps: float
     flow_downsample_width_px: int
     forward_roi_top_fraction: float
     forward_roi_bottom_fraction: float
@@ -67,17 +57,17 @@ class OpticalFlowMagnitudePolicyConfig:
     occlusion_extreme_fraction_threshold: float
     caution_flow_magnitude_threshold: float
     stop_flow_magnitude_threshold: float
-    static_scene_frame_count: int
 
 
 class GuardrailPolicy(Protocol):
-    def evaluate(
-        self,
-        previous_image: Image,
-        current_image: Image,
-        incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
-    ) -> GuardrailDecision: ...
+    """Detector contract: measure risk from a frame pair, nothing more.
+
+    The module validates inputs before calling evaluate, decides what the reported
+    risk means for the robot's state, and builds the outgoing command. reset()
+    exists for detectors that carry state across frames.
+    """
+
+    def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult: ...
 
     def reset(self) -> None: ...
 
@@ -95,130 +85,30 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
     _FARNEBACK_POLY_SIGMA = 1.2
     _FARNEBACK_FLAGS = 0
 
-    def __init__(
-        self,
-        config: OpticalFlowMagnitudePolicyConfig,
-        hysteresis: RiskHysteresis,
-    ) -> None:
+    def __init__(self, config: OpticalFlowMagnitudePolicyConfig) -> None:
         self._config = config
-        self._hysteresis = hysteresis
-        self._static_frame_hits = 0
 
-    def evaluate(
-        self,
-        previous_image: Image,
-        current_image: Image,
-        incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
-    ) -> GuardrailDecision:
-        if not health.has_previous_frame:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.INIT,
-                "missing_previous_frame",
-                risk_score=0.0,
-            )
-
-        if not health.image_fresh:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "image_not_fresh",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
-
-        if not health.frame_pair_fresh:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "frame_pair_stale",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
-
-        forward_speed = float(incoming_cmd_vel.linear.x)
-        if forward_speed <= self._config.forward_motion_deadband_mps:
-            return self._pass_decision(incoming_cmd_vel, "forward_guard_inactive", 0.0)
-
+    def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
         previous_gray = self._to_resized_gray(previous_image)
         current_gray = self._to_resized_gray(current_image)
-
-        if previous_gray.shape != current_gray.shape:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "frame_shape_mismatch",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
 
         previous_roi, current_roi = self._extract_forward_rois(previous_gray, current_gray)
 
         if previous_roi.size == 0 or current_roi.size == 0:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "invalid_forward_roi",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
+            return RiskUnavailable("invalid_forward_roi")
 
         quality_failure_reason = self._quality_failure_reason(previous_roi, current_roi)
         if quality_failure_reason is not None:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                quality_failure_reason,
-                risk_score=1.0,
-                publish_immediately=True,
-            )
-
-        if np.array_equal(previous_roi, current_roi):
-            self._static_frame_hits += 1
-            if self._static_frame_hits >= self._config.static_scene_frame_count:
-                self._hysteresis.reset()
-                return self._zero_decision(
-                    GuardrailState.SENSOR_DEGRADED,
-                    "static_scene",
-                    risk_score=1.0,
-                    publish_immediately=True,
-                )
-        else:
-            self._static_frame_hits = 0
+            return RiskUnavailable(quality_failure_reason)
 
         mean_flow_magnitude = self._mean_flow_magnitude(previous_roi, current_roi)
-        risk_level = self._risk_level(mean_flow_magnitude)
-        next_state = self._hysteresis.observe(risk_level)
-
-        if next_state == GuardrailState.STOP_LATCHED:
-            return self._stop_forward_decision(
-                incoming_cmd_vel,
-                "forward_flow_stop",
-                mean_flow_magnitude,
-            )
-
-        if next_state == GuardrailState.CLAMP:
-            reason = (
-                "forward_flow_clamp"
-                if risk_level >= RiskLevel.CAUTION
-                else "forward_flow_recovery"
-            )
-            return self._clamp_forward_decision(
-                incoming_cmd_vel,
-                reason,
-                mean_flow_magnitude,
-            )
-
-        return self._pass_decision(
-            incoming_cmd_vel,
-            "forward_flow_clear",
-            mean_flow_magnitude,
+        return RiskAssessment(
+            level=self._risk_level(mean_flow_magnitude),
+            score=mean_flow_magnitude,
         )
 
     def reset(self) -> None:
-        self._hysteresis.reset()
-        self._static_frame_hits = 0
+        """No-op: this detector carries no state between frame pairs."""
 
     def _to_resized_gray(self, image: Image) -> GrayImage:
         gray = cast("GrayImage", image.to_grayscale().data)
@@ -320,71 +210,3 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
 
         return RiskLevel.CLEAR
 
-    def _pass_decision(
-        self,
-        incoming_cmd_vel: Twist,
-        reason: str,
-        risk_score: float,
-    ) -> GuardrailDecision:
-        cmd_vel = Twist(
-            linear=incoming_cmd_vel.linear,
-            angular=incoming_cmd_vel.angular,
-        )
-        return GuardrailDecision(
-            state=GuardrailState.PASS,
-            cmd_vel=cmd_vel,
-            reason=reason,
-            risk_score=risk_score,
-        )
-
-    def _clamp_forward_decision(
-        self,
-        incoming_cmd_vel: Twist,
-        reason: str,
-        risk_score: float,
-    ) -> GuardrailDecision:
-        cmd_vel = Twist(
-            linear=incoming_cmd_vel.linear,
-            angular=incoming_cmd_vel.angular,
-        )
-        cmd_vel.linear.x = min(float(cmd_vel.linear.x), self._config.clamp_forward_speed_mps)
-        return GuardrailDecision(
-            state=GuardrailState.CLAMP,
-            cmd_vel=cmd_vel,
-            reason=reason,
-            risk_score=risk_score,
-        )
-
-    def _stop_forward_decision(
-        self,
-        incoming_cmd_vel: Twist,
-        reason: str,
-        risk_score: float,
-    ) -> GuardrailDecision:
-        cmd_vel = Twist(
-            linear=incoming_cmd_vel.linear,
-            angular=incoming_cmd_vel.angular,
-        )
-        cmd_vel.linear.x = 0.0
-        return GuardrailDecision(
-            state=GuardrailState.STOP_LATCHED,
-            cmd_vel=cmd_vel,
-            reason=reason,
-            risk_score=risk_score,
-        )
-
-    def _zero_decision(
-        self,
-        state: GuardrailState,
-        reason: str,
-        *,
-        risk_score: float = 0.0,
-        publish_immediately: bool = False,
-    ) -> GuardrailDecision:
-        return GuardrailDecision(
-            state=state,
-            cmd_vel=Twist.zero(),
-            reason=reason,
-            risk_score=risk_score,
-            publish_immediately=publish_immediately,
-        )

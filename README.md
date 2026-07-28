@@ -35,6 +35,8 @@ flowchart LR
 ```
 
 - **[`rgb_collision_guardrail.py`](dimos/control/safety/rgb_collision_guardrail.py)** — the module shell: stream I/O, freshness checks, scheduling, publishing. Callbacks only store the latest input; all decisions run on one thread (why, in [Design decisions](#design-decisions-worth-reading-the-code-for)).
+
+  The guardrail sits on the single authoritative command path to the robot and gates whatever arrives on it, treating the most recent message as current. How that stream is produced upstream is outside what it needs to know.
 - **[`guardrail_policy.py`](dimos/control/safety/guardrail_policy.py)** — the collision detector behind a small `Protocol`: takes a frame pair, returns a decision. Optical flow in v1; that seam is the first design decision below.
 
 ### The state machine

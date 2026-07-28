@@ -16,7 +16,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
+
+from dimos.msgs.geometry_msgs.Twist import Twist
 
 
 class GuardrailState(str, Enum):
@@ -25,3 +28,11 @@ class GuardrailState(str, Enum):
     CLAMP = "clamp"
     STOP_LATCHED = "stop_latched"
     SENSOR_DEGRADED = "sensor_degraded"
+
+
+@dataclass
+class GuardrailDecision:
+    state: GuardrailState
+    cmd_vel: Twist
+    reason: str
+    risk_score: float = 0.0
