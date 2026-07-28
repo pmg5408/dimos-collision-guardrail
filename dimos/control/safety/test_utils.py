@@ -19,8 +19,9 @@ from typing import Any, TypeVar
 
 import numpy as np
 
-from dimos.control.safety.guardrail_policy import GuardrailDecision
-from dimos.control.safety.guardrail_types import GuardrailState
+from dimos.control.safety.guardrail_hysteresis import RiskLevel
+from dimos.control.safety.guardrail_policy import RiskAssessment, RiskResult
+from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
 from dimos.core.stream import Out, Transport
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
@@ -56,21 +57,18 @@ class FakeTransport(Transport[T]):
 
 
 class SequencePolicy:
-    def __init__(self, decisions: list[GuardrailDecision]) -> None:
-        self._decisions = decisions
+    """Replays risk readings, repeating the last one once exhausted."""
+
+    def __init__(self, results: list[RiskResult]) -> None:
+        self._results = results
         self._index = 0
 
-    def evaluate(
-        self,
-        previous_image: Image,
-        current_image: Image,
-        incoming_cmd_vel: Twist,
-    ) -> GuardrailDecision:
-        if self._index < len(self._decisions):
-            decision = self._decisions[self._index]
+    def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
+        if self._index < len(self._results):
+            result = self._results[self._index]
             self._index += 1
-            return decision
-        return self._decisions[-1]
+            return result
+        return self._results[-1]
 
     def reset(self) -> None:
         self._index = 0
@@ -92,6 +90,10 @@ def _cmd(
         linear=[x, linear_y, 0.0],
         angular=[0.0, 0.0, angular_z],
     )
+
+
+def _assessment(level: RiskLevel, score: float = 0.0) -> RiskAssessment:
+    return RiskAssessment(level=level, score=score)
 
 
 def _decision(

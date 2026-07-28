@@ -23,11 +23,16 @@ from typing import TypeVar
 import numpy as np
 import pytest
 
-from dimos.control.safety.guardrail_types import GuardrailState
+from dimos.control.safety.guardrail_hysteresis import (
+    HysteresisConfig,
+    RiskHysteresis,
+    RiskLevel,
+)
 from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
 from dimos.control.safety.test_utils import (
     FakeTransport,
     SequencePolicy,
+    _assessment,
     _cmd,
     _decision,
     _textured_gray_image,
@@ -142,8 +147,14 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
     guarded = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
     try:
-        guardrail._policy = SequencePolicy(
-            [_decision(GuardrailState.CLAMP, guarded, reason="forced_clamp")]
+        guardrail._policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
+        guardrail._hysteresis = RiskHysteresis(
+            HysteresisConfig(
+                caution_frame_count=1,
+                stop_frame_count=2,
+                clear_frame_count=3,
+                stop_release_frame_count=2,
+            )
         )
 
         cmd_transport.publish(_cmd(0.4, angular_z=0.2))
@@ -206,15 +217,14 @@ def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() ->
             errors.append(exc)
 
     try:
-        guardrail._policy = SequencePolicy(
-            [
-                _decision(
-                    GuardrailState.STOP_LATCHED,
-                    stop_cmd,
-                    reason="forced_stop",
-                    publish_immediately=True,
-                )
-            ]
+        guardrail._policy = SequencePolicy([_assessment(RiskLevel.STOP)])
+        guardrail._hysteresis = RiskHysteresis(
+            HysteresisConfig(
+                caution_frame_count=2,
+                stop_frame_count=1,
+                clear_frame_count=3,
+                stop_release_frame_count=2,
+            )
         )
 
         image_thread = threading.Thread(target=publish_images, daemon=True)

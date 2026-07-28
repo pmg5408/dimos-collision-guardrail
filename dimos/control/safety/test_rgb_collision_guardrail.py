@@ -22,12 +22,18 @@ from typing import Any, TypeVar
 
 import pytest
 
-from dimos.control.safety.guardrail_policy import GuardrailDecision
-from dimos.control.safety.guardrail_types import GuardrailState
+from dimos.control.safety.guardrail_hysteresis import RiskLevel
+from dimos.control.safety.guardrail_policy import (
+    RiskAssessment,
+    RiskResult,
+    RiskUnavailable,
+)
+from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
 from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
 from dimos.control.safety.test_utils import (
     FakeTransport,
     SequencePolicy,
+    _assessment,
     _cmd,
     _decision,
     _textured_gray_image,
@@ -39,12 +45,7 @@ T = TypeVar("T")
 
 
 class RaisingPolicy:
-    def evaluate(
-        self,
-        previous_image: Image,
-        current_image: Image,
-        incoming_cmd_vel: Twist,
-    ) -> GuardrailDecision:
+    def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
         raise RuntimeError("synthetic policy failure")
 
     def reset(self) -> None:
@@ -61,23 +62,11 @@ class CountingPassPolicy:
         with self._lock:
             return self._call_count
 
-    def evaluate(
-        self,
-        previous_image: Image,
-        current_image: Image,
-        incoming_cmd_vel: Twist,
-    ) -> GuardrailDecision:
+    def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
         with self._lock:
             self._call_count += 1
 
-        return GuardrailDecision(
-            state=GuardrailState.PASS,
-            cmd_vel=Twist(
-                linear=incoming_cmd_vel.linear,
-                angular=incoming_cmd_vel.angular,
-            ),
-            reason="counting_pass",
-        )
+        return RiskAssessment(level=RiskLevel.CLEAR, score=0.0)
 
     def reset(self) -> None:
         with self._lock:
@@ -241,6 +230,65 @@ def test_stale_image_returns_sensor_degraded_zero(module: RGBCollisionGuardrail)
     assert decision.cmd_vel == Twist.zero()
 
 
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        pytest.param(_cmd(0.03, angular_z=0.35), id="below_forward_deadband"),
+        pytest.param(_cmd(-0.2, angular_z=0.4), id="reverse_motion"),
+        pytest.param(Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.6]), id="pure_yaw"),
+    ],
+)
+def test_forward_motion_not_commanded_below_deadband(
+    module: RGBCollisionGuardrail,
+    cmd: Twist,
+) -> None:
+    assert module._forward_motion_commanded(cmd) is False
+
+
+def test_forward_motion_commanded_above_deadband(module: RGBCollisionGuardrail) -> None:
+    assert module._forward_motion_commanded(_cmd(0.4)) is True
+
+
+def test_clamp_limits_forward_speed_and_preserves_angular(
+    module: RGBCollisionGuardrail,
+) -> None:
+    incoming = _cmd(0.5, angular_z=0.42)
+
+    decision = module._build_clamp_decision(incoming, "risk_clamp", 1.0)
+
+    assert decision.state == GuardrailState.CLAMP
+    assert decision.cmd_vel.linear.x == pytest.approx(module.config.clamp_forward_speed_mps)
+    assert decision.cmd_vel.angular.z == pytest.approx(0.42)
+
+
+def test_clamp_does_not_raise_a_slower_forward_speed(module: RGBCollisionGuardrail) -> None:
+    slower_than_clamp = module.config.clamp_forward_speed_mps / 2.0
+
+    decision = module._build_clamp_decision(_cmd(slower_than_clamp), "risk_clamp", 1.0)
+
+    assert decision.cmd_vel.linear.x == pytest.approx(slower_than_clamp)
+
+
+def test_stop_zeroes_forward_speed_and_preserves_angular(
+    module: RGBCollisionGuardrail,
+) -> None:
+    decision = module._build_stop_decision(_cmd(0.5, angular_z=0.42), "risk_stop", 1.0)
+
+    assert decision.state == GuardrailState.STOP_LATCHED
+    assert decision.cmd_vel.linear.x == pytest.approx(0.0)
+    assert decision.cmd_vel.angular.z == pytest.approx(0.42)
+
+
+def test_unavailable_assessment_degrades_with_the_reported_reason(
+    module: RGBCollisionGuardrail,
+) -> None:
+    decision = module._decision_from_assessment(RiskUnavailable("current_roi_occluded"), _cmd(0.4))
+
+    assert decision.state == GuardrailState.SENSOR_DEGRADED
+    assert decision.reason == "current_roi_occluded"
+    assert decision.cmd_vel == Twist.zero()
+
+
 def test_frame_shape_mismatch_returns_sensor_degraded_zero(
     module: RGBCollisionGuardrail,
 ) -> None:
@@ -389,8 +437,7 @@ def test_frozen_stream_counter_advances_per_frame_pair_not_per_tick() -> None:
 def test_pass_publishes_latest_upstream_command() -> None:
     upstream_first = _cmd(0.3, angular_z=0.1)
     upstream_second = _cmd(0.45, angular_z=0.35)
-    misleading_policy_cmd = _cmd(0.02, angular_z=-0.2)
-    policy = SequencePolicy([_decision(GuardrailState.PASS, misleading_policy_cmd, reason="pass")])
+    policy = SequencePolicy([_assessment(RiskLevel.CLEAR)])
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
 
     try:
@@ -409,27 +456,39 @@ def test_pass_publishes_latest_upstream_command() -> None:
 
 
 @pytest.mark.parametrize(
-    ("state", "guarded_cmd"),
+    ("level", "frame_counts", "guarded_cmd"),
     [
-        (
-            GuardrailState.CLAMP,
+        pytest.param(
+            RiskLevel.CAUTION,
+            {"caution_frame_count": 1},
             Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.4]),
+            id="caution_clamps_forward_speed",
         ),
-        (
-            GuardrailState.STOP_LATCHED,
+        pytest.param(
+            RiskLevel.STOP,
+            {"stop_frame_count": 2},
             Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.4]),
+            id="repeated_stop_zeroes_forward_speed",
         ),
     ],
 )
-def test_non_pass_states_publish_guarded_output(state: GuardrailState, guarded_cmd: Twist) -> None:
+def test_non_pass_states_publish_guarded_output(
+    level: RiskLevel,
+    frame_counts: dict[str, float],
+    guarded_cmd: Twist,
+) -> None:
     upstream_cmd = _cmd(0.35, angular_z=0.4)
-    policy = SequencePolicy([_decision(state, guarded_cmd)])
-    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
+    policy = SequencePolicy([_assessment(level)])
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        policy,
+        **frame_counts,
+    )
 
     try:
         cmd_transport.publish(upstream_cmd)
         image_transport.publish(_textured_gray_image())
         image_transport.publish(_textured_gray_image(shift_x=2))
+        image_transport.publish(_textured_gray_image(shift_x=4))
 
         published = _wait_for_output(outputs, lambda twist: twist == guarded_cmd)
         assert published == guarded_cmd
@@ -439,8 +498,11 @@ def test_non_pass_states_publish_guarded_output(state: GuardrailState, guarded_c
 
 def test_non_pass_heartbeat_republishes_guarded_output() -> None:
     guarded_cmd = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.5])
-    policy = SequencePolicy([_decision(GuardrailState.CLAMP, guarded_cmd)])
-    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
+    policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        policy,
+        caution_frame_count=1,
+    )
 
     try:
         cmd_transport.publish(_cmd(0.4, angular_z=0.5))
@@ -461,16 +523,14 @@ def test_non_pass_decision_can_publish_without_new_command() -> None:
     stop_cmd = Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.3])
     policy = SequencePolicy(
         [
-            _decision(GuardrailState.PASS, upstream_cmd, reason="initial_pass"),
-            _decision(
-                GuardrailState.STOP_LATCHED,
-                stop_cmd,
-                reason="forced_stop",
-                publish_immediately=True,
-            ),
+            _assessment(RiskLevel.CLEAR),
+            _assessment(RiskLevel.STOP),
         ]
     )
-    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        policy,
+        stop_frame_count=1,
+    )
 
     try:
         cmd_transport.publish(upstream_cmd)
@@ -573,11 +633,11 @@ def test_double_start_raises() -> None:
 
 
 def test_restart_resets_runtime_state() -> None:
-    stop_cmd = Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.3])
-    policy = SequencePolicy(
-        [_decision(GuardrailState.STOP_LATCHED, stop_cmd, publish_immediately=True)]
+    policy = SequencePolicy([_assessment(RiskLevel.STOP)])
+    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
+        policy,
+        stop_frame_count=1,
     )
-    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(policy)
 
     try:
         cmd_transport.publish(_cmd(0.4, angular_z=0.3))

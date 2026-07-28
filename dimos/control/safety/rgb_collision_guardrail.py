@@ -23,14 +23,20 @@ import numpy as np
 from pydantic import Field, model_validator
 from reactivex.disposable import CompositeDisposable, Disposable
 
-from dimos.control.safety.guardrail_hysteresis import HysteresisConfig, RiskHysteresis
+from dimos.control.safety.guardrail_hysteresis import (
+    HysteresisConfig,
+    RiskHysteresis,
+    RiskLevel,
+)
 from dimos.control.safety.guardrail_policy import (
-    GuardrailDecision,
     GuardrailPolicy,
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
+    RiskAssessment,
+    RiskResult,
+    RiskUnavailable,
 )
-from dimos.control.safety.guardrail_types import GuardrailState
+from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
@@ -124,7 +130,13 @@ class _GuardrailRuntimeState:
 
 
 @dataclass(frozen=True)
-class _RiskEvaluationInput:
+class _InputSnapshot:
+    """A consistent read of the incoming streams, taken under the lock.
+
+    Captured so the expensive work of a decision runs outside the lock against
+    values that cannot change underneath it.
+    """
+
     previous_image: Image
     current_image: Image
     incoming_cmd_vel: Twist
@@ -144,6 +156,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     _stop_event: Event
     _thread: Thread | None
     _policy: GuardrailPolicy
+    _hysteresis: RiskHysteresis
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -152,11 +165,20 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._stop_event = Event()
         self._thread = None
         self._policy = self._build_policy()
+        self._hysteresis = self._build_hysteresis()
+
+    def _build_hysteresis(self) -> RiskHysteresis:
+        return RiskHysteresis(
+            HysteresisConfig(
+                caution_frame_count=self.config.caution_frame_count,
+                stop_frame_count=self.config.stop_frame_count,
+                clear_frame_count=self.config.clear_frame_count,
+                stop_release_frame_count=self.config.stop_release_frame_count,
+            )
+        )
 
     def _build_policy(self) -> GuardrailPolicy:
         policy_config = OpticalFlowMagnitudePolicyConfig(
-            forward_motion_deadband_mps=self.config.forward_motion_deadband_mps,
-            clamp_forward_speed_mps=self.config.clamp_forward_speed_mps,
             flow_downsample_width_px=self.config.flow_downsample_width_px,
             forward_roi_top_fraction=self.config.forward_roi_top_fraction,
             forward_roi_bottom_fraction=self.config.forward_roi_bottom_fraction,
@@ -168,15 +190,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             caution_flow_magnitude_threshold=self.config.caution_flow_magnitude_threshold,
             stop_flow_magnitude_threshold=self.config.stop_flow_magnitude_threshold,
         )
-        hysteresis = RiskHysteresis(
-            HysteresisConfig(
-                caution_frame_count=self.config.caution_frame_count,
-                stop_frame_count=self.config.stop_frame_count,
-                clear_frame_count=self.config.clear_frame_count,
-                stop_release_frame_count=self.config.stop_release_frame_count,
-            )
-        )
-        return OpticalFlowMagnitudeGuardrailPolicy(policy_config, hysteresis)
+        return OpticalFlowMagnitudeGuardrailPolicy(policy_config)
 
     @rpc
     def start(self) -> None:
@@ -192,6 +206,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         with self._condition:
             self._runtime_state = _GuardrailRuntimeState()
             self._runtime_state.next_risk_time = time.monotonic()
+        self._hysteresis.reset()
         self._policy.reset()
 
         self._disposables.add(Disposable(self.color_image.subscribe(self._on_color_image)))
@@ -257,7 +272,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
     def _decision_loop(self) -> None:
         while not self._stop_event.is_set():
-            risk_input: _RiskEvaluationInput | None = None
+            snapshot: _InputSnapshot | None = None
             input_failure: GuardrailDecision | None = None
 
             with self._condition:
@@ -277,30 +292,42 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                     )
                     input_failure = self._frozen_stream_decision_locked()
                     if input_failure is None:
-                        risk_input = self._take_risk_evaluation_input_locked()
+                        snapshot = self._take_input_snapshot_locked()
 
             # Evaluate a consistent snapshot outside the condition lock so image
             # and command callbacks stay cheap. If newer inputs arrive while
             # evaluation runs, the next wakeup will process that fresher snapshot.
-            policy_decision: GuardrailDecision | None = None
-            if risk_input is not None:
-                try:
-                    policy_decision = self._policy.evaluate(
-                        previous_image=risk_input.previous_image,
-                        current_image=risk_input.current_image,
-                        incoming_cmd_vel=risk_input.incoming_cmd_vel,
+            evaluated_decision: GuardrailDecision | None = None
+            if snapshot is not None:
+                incoming_cmd_vel = snapshot.incoming_cmd_vel
+                if not self._forward_motion_commanded(incoming_cmd_vel):
+                    evaluated_decision = self._build_pass_decision(
+                        incoming_cmd_vel,
+                        "forward_guard_inactive",
+                        0.0,
                     )
-                except Exception:
-                    with self._condition:
-                        _logged_state = self._runtime_state.state.value
+                else:
+                    try:
+                        assessment = self._policy.evaluate(
+                            previous_image=snapshot.previous_image,
+                            current_image=snapshot.current_image,
+                        )
+                    except Exception:
+                        with self._condition:
+                            _logged_state = self._runtime_state.state.value
 
-                    logger.exception(
-                        "RGB guardrail policy evaluation failed",
-                        state=_logged_state,
-                    )
-                    policy_decision = self._build_sensor_degraded_decision(
-                        "policy_evaluation_failed"
-                    )
+                        logger.exception(
+                            "RGB guardrail policy evaluation failed",
+                            state=_logged_state,
+                        )
+                        evaluated_decision = self._build_sensor_degraded_decision(
+                            "policy_evaluation_failed"
+                        )
+                    else:
+                        evaluated_decision = self._decision_from_assessment(
+                            assessment,
+                            incoming_cmd_vel,
+                        )
 
             cmd_vel_to_publish: Twist | None = None
             publish_time: float | None = None
@@ -308,9 +335,9 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             with self._condition:
                 now = time.monotonic()
 
-                if policy_decision is not None:
+                if evaluated_decision is not None:
                     self._store_decision_locked(
-                        policy_decision,
+                        evaluated_decision,
                         now,
                         update_risk_time=True,
                     )
@@ -419,7 +446,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
         return last_decision.cmd_vel
 
-    def _take_risk_evaluation_input_locked(self) -> _RiskEvaluationInput | None:
+    def _take_input_snapshot_locked(self) -> _InputSnapshot | None:
         previous_image = self._runtime_state.previous_image
         current_image = self._runtime_state.latest_image
         incoming_cmd_vel = self._runtime_state.latest_cmd_vel
@@ -427,7 +454,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         if previous_image is None or current_image is None or incoming_cmd_vel is None:
             return None
 
-        return _RiskEvaluationInput(
+        return _InputSnapshot(
             previous_image=previous_image,
             current_image=current_image,
             incoming_cmd_vel=incoming_cmd_vel,
@@ -538,6 +565,80 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
         return min(timeouts)
 
+    def _forward_motion_commanded(self, incoming_cmd_vel: Twist) -> bool:
+        return float(incoming_cmd_vel.linear.x) > self.config.forward_motion_deadband_mps
+
+    def _decision_from_assessment(
+        self,
+        assessment: RiskResult,
+        incoming_cmd_vel: Twist,
+    ) -> GuardrailDecision:
+        if isinstance(assessment, RiskUnavailable):
+            self._hysteresis.reset()
+            return self._build_sensor_degraded_decision(assessment.reason)
+
+        state = self._hysteresis.observe(assessment.level)
+        return self._decision_for_state(state, assessment, incoming_cmd_vel)
+
+    def _decision_for_state(
+        self,
+        state: GuardrailState,
+        assessment: RiskAssessment,
+        incoming_cmd_vel: Twist,
+    ) -> GuardrailDecision:
+        if state == GuardrailState.STOP_LATCHED:
+            return self._build_stop_decision(incoming_cmd_vel, "risk_stop", assessment.score)
+
+        if state == GuardrailState.CLAMP:
+            # A clamp entered from a clear reading means the latch is releasing.
+            reason = "risk_clamp" if assessment.level >= RiskLevel.CAUTION else "risk_recovery"
+            return self._build_clamp_decision(incoming_cmd_vel, reason, assessment.score)
+
+        return self._build_pass_decision(incoming_cmd_vel, "risk_clear", assessment.score)
+
+    def _build_pass_decision(
+        self,
+        incoming_cmd_vel: Twist,
+        reason: str,
+        risk_score: float,
+    ) -> GuardrailDecision:
+        return GuardrailDecision(
+            state=GuardrailState.PASS,
+            cmd_vel=Twist(linear=incoming_cmd_vel.linear, angular=incoming_cmd_vel.angular),
+            reason=reason,
+            risk_score=risk_score,
+        )
+
+    def _build_clamp_decision(
+        self,
+        incoming_cmd_vel: Twist,
+        reason: str,
+        risk_score: float,
+    ) -> GuardrailDecision:
+        cmd_vel = Twist(linear=incoming_cmd_vel.linear, angular=incoming_cmd_vel.angular)
+        cmd_vel.linear.x = min(float(cmd_vel.linear.x), self.config.clamp_forward_speed_mps)
+        return GuardrailDecision(
+            state=GuardrailState.CLAMP,
+            cmd_vel=cmd_vel,
+            reason=reason,
+            risk_score=risk_score,
+        )
+
+    def _build_stop_decision(
+        self,
+        incoming_cmd_vel: Twist,
+        reason: str,
+        risk_score: float,
+    ) -> GuardrailDecision:
+        cmd_vel = Twist(linear=incoming_cmd_vel.linear, angular=incoming_cmd_vel.angular)
+        cmd_vel.linear.x = 0.0
+        return GuardrailDecision(
+            state=GuardrailState.STOP_LATCHED,
+            cmd_vel=cmd_vel,
+            reason=reason,
+            risk_score=risk_score,
+        )
+
     def _build_zero_decision(
         self,
         state: GuardrailState,
@@ -570,11 +671,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         )
 
     def _input_failure_decision_locked(self, now: float) -> GuardrailDecision | None:
-        """Reject inputs the policy must never be asked to evaluate.
-
-        Ordered by fail-closed precedence: absent inputs before stale ones, and
-        stale ones before malformed ones.
-        """
         if self._runtime_state.latest_cmd_vel is None:
             return self._build_init_decision("no_command_received")
 
@@ -602,11 +698,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         return None
 
     def _risk_staleness_decision_locked(self, now: float) -> GuardrailDecision | None:
-        """Fail closed when inputs are healthy but no recent decision exists.
-
-        Separate from input validation because it inspects evaluation output. Were
-        it to gate evaluation, the first one could never run.
-        """
         if self._runtime_state.last_risk_time is None:
             return self._build_init_decision("waiting_for_first_risk_evaluation")
 
