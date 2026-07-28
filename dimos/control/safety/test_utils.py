@@ -19,10 +19,7 @@ from typing import Any, TypeVar
 
 import numpy as np
 
-from dimos.control.safety.guardrail_policy import (
-    GuardrailDecision,
-    GuardrailHealth,
-)
+from dimos.control.safety.guardrail_policy import GuardrailDecision
 from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.core.stream import Out, Transport
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -68,7 +65,6 @@ class SequencePolicy:
         previous_image: Image,
         current_image: Image,
         incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
     ) -> GuardrailDecision:
         if self._index < len(self._decisions):
             decision = self._decisions[self._index]

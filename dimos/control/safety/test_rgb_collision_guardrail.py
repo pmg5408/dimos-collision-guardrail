@@ -22,10 +22,7 @@ from typing import Any, TypeVar
 
 import pytest
 
-from dimos.control.safety.guardrail_policy import (
-    GuardrailDecision,
-    GuardrailHealth,
-)
+from dimos.control.safety.guardrail_policy import GuardrailDecision
 from dimos.control.safety.guardrail_types import GuardrailState
 from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
 from dimos.control.safety.test_utils import (
@@ -47,7 +44,6 @@ class RaisingPolicy:
         previous_image: Image,
         current_image: Image,
         incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
     ) -> GuardrailDecision:
         raise RuntimeError("synthetic policy failure")
 
@@ -70,7 +66,6 @@ class CountingPassPolicy:
         previous_image: Image,
         current_image: Image,
         incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
     ) -> GuardrailDecision:
         with self._lock:
             self._call_count += 1
@@ -168,7 +163,7 @@ def test_no_command_returns_init_zero(module: RGBCollisionGuardrail) -> None:
     now = time.monotonic()
 
     with module._condition:
-        decision = module._select_fallback_decision_locked(now)
+        decision = module._input_failure_decision_locked(now)
 
     assert decision is not None
     assert decision.state == GuardrailState.INIT
@@ -182,7 +177,7 @@ def test_waiting_for_first_image_returns_init_zero(module: RGBCollisionGuardrail
     with module._condition:
         module._runtime_state.latest_cmd_vel = _cmd()
         module._runtime_state.latest_cmd_time = now
-        decision = module._select_fallback_decision_locked(now)
+        decision = module._input_failure_decision_locked(now)
 
     assert decision is not None
     assert decision.state == GuardrailState.INIT
@@ -198,7 +193,7 @@ def test_no_frame_pair_returns_init_zero(module: RGBCollisionGuardrail) -> None:
         module._runtime_state.latest_cmd_time = now
         module._runtime_state.latest_image = _textured_gray_image()
         module._runtime_state.latest_image_time = now
-        decision = module._select_fallback_decision_locked(now)
+        decision = module._input_failure_decision_locked(now)
 
     assert decision is not None
     assert decision.state == GuardrailState.INIT
@@ -219,7 +214,7 @@ def test_waiting_for_first_risk_evaluation_returns_init_zero(
         module._runtime_state.latest_image = _textured_gray_image(shift_x=2)
         module._runtime_state.latest_image_time = now
         module._runtime_state.last_risk_time = None
-        decision = module._select_fallback_decision_locked(now)
+        decision = module._risk_staleness_decision_locked(now)
 
     assert decision is not None
     assert decision.state == GuardrailState.INIT
@@ -238,12 +233,70 @@ def test_stale_image_returns_sensor_degraded_zero(module: RGBCollisionGuardrail)
         module._runtime_state.latest_image = _textured_gray_image(shift_x=2)
         module._runtime_state.previous_image_time = stale_time
         module._runtime_state.latest_image_time = stale_time
-        decision = module._select_fallback_decision_locked(now)
+        decision = module._input_failure_decision_locked(now)
 
     assert decision is not None
     assert decision.state == GuardrailState.SENSOR_DEGRADED
     assert decision.reason == "image_stale"
     assert decision.cmd_vel == Twist.zero()
+
+
+def test_frame_shape_mismatch_returns_sensor_degraded_zero(
+    module: RGBCollisionGuardrail,
+) -> None:
+    now = time.monotonic()
+
+    with module._condition:
+        module._runtime_state.latest_cmd_vel = _cmd()
+        module._runtime_state.latest_cmd_time = now
+        module._runtime_state.previous_image = _textured_gray_image(width=160, height=120)
+        module._runtime_state.latest_image = _textured_gray_image(width=160, height=90)
+        module._runtime_state.previous_image_time = now
+        module._runtime_state.latest_image_time = now
+        decision = module._input_failure_decision_locked(now)
+
+    assert decision is not None
+    assert decision.state == GuardrailState.SENSOR_DEGRADED
+    assert decision.reason == "frame_shape_mismatch"
+    assert decision.cmd_vel == Twist.zero()
+
+
+def test_frozen_stream_degrades_after_repeated_identical_frames(
+    module: RGBCollisionGuardrail,
+) -> None:
+    frame = _textured_gray_image()
+
+    with module._condition:
+        module._runtime_state.previous_image = frame
+        module._runtime_state.latest_image = frame
+
+        first = module._frozen_stream_decision_locked()
+        second = module._frozen_stream_decision_locked()
+        third = module._frozen_stream_decision_locked()
+
+    assert first is None
+    assert second is None
+    assert third is not None
+    assert third.state == GuardrailState.SENSOR_DEGRADED
+    assert third.reason == "static_scene"
+    assert third.cmd_vel == Twist.zero()
+
+
+def test_frozen_stream_counter_resets_when_a_frame_changes(
+    module: RGBCollisionGuardrail,
+) -> None:
+    frame = _textured_gray_image()
+
+    with module._condition:
+        module._runtime_state.previous_image = frame
+        module._runtime_state.latest_image = frame
+        module._frozen_stream_decision_locked()
+        module._frozen_stream_decision_locked()
+
+        module._runtime_state.latest_image = _textured_gray_image(shift_x=3)
+        module._frozen_stream_decision_locked()
+
+        assert module._runtime_state.static_frame_hits == 0
 
 
 def test_stale_risk_returns_sensor_degraded_zero(module: RGBCollisionGuardrail) -> None:
@@ -258,7 +311,7 @@ def test_stale_risk_returns_sensor_degraded_zero(module: RGBCollisionGuardrail) 
         module._runtime_state.previous_image_time = now
         module._runtime_state.latest_image_time = now
         module._runtime_state.last_risk_time = stale_risk_time
-        decision = module._select_fallback_decision_locked(now)
+        decision = module._risk_staleness_decision_locked(now)
 
     assert decision is not None
     assert decision.state == GuardrailState.SENSOR_DEGRADED
@@ -305,6 +358,30 @@ def test_policy_exception_fail_closes_to_zero() -> None:
 
         with guardrail._condition:
             assert guardrail._runtime_state.state == GuardrailState.SENSOR_DEGRADED
+    finally:
+        guardrail.stop()
+
+
+def test_frozen_stream_counter_advances_per_frame_pair_not_per_tick() -> None:
+    policy = CountingPassPolicy()
+    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
+        policy,
+        static_scene_frame_count=3,
+        image_timeout_s=5.0,
+        risk_timeout_s=5.0,
+    )
+
+    try:
+        cmd_transport.publish(_cmd())
+        frame = _textured_gray_image()
+        image_transport.publish(frame)
+        image_transport.publish(frame)
+
+        time.sleep(0.2)
+
+        with guardrail._condition:
+            assert guardrail._runtime_state.static_frame_hits == 1
+            assert guardrail._runtime_state.state != GuardrailState.SENSOR_DEGRADED
     finally:
         guardrail.stop()
 

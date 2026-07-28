@@ -23,7 +23,6 @@ from dimos.control.safety.guardrail_hysteresis import (
     RiskLevel,
 )
 from dimos.control.safety.guardrail_policy import (
-    GuardrailHealth,
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
 )
@@ -41,8 +40,7 @@ def _policy(
     stop_frame_count: int = 2,
     clear_frame_count: int = 3,
     stop_release_frame_count: int = 2,
-    static_scene_frame_count: int = 3,
-) -> OpticalFlowMagnitudeGuardrailPolicy:
+    ) -> OpticalFlowMagnitudeGuardrailPolicy:
     config = OpticalFlowMagnitudePolicyConfig(
         forward_motion_deadband_mps=0.05,
         clamp_forward_speed_mps=0.1,
@@ -56,7 +54,6 @@ def _policy(
         occlusion_extreme_fraction_threshold=0.9,
         caution_flow_magnitude_threshold=0.8,
         stop_flow_magnitude_threshold=1.5,
-        static_scene_frame_count=static_scene_frame_count,
     )
     hysteresis = RiskHysteresis(
         HysteresisConfig(
@@ -79,21 +76,6 @@ def _forward_cmd(
     return Twist(
         linear=[x, linear_y, linear_z],
         angular=[0.0, 0.0, angular_z],
-    )
-
-
-def _fresh_health(
-    *,
-    has_previous_frame: bool = True,
-    image_fresh: bool = True,
-    frame_pair_fresh: bool = True,
-) -> GuardrailHealth:
-    return GuardrailHealth(
-        has_previous_frame=has_previous_frame,
-        image_fresh=image_fresh,
-        cmd_fresh=True,
-        risk_fresh=True,
-        frame_pair_fresh=frame_pair_fresh,
     )
 
 
@@ -127,103 +109,11 @@ def test_forward_guard_inactive_passthrough(image_pair: tuple[Image, Image], cmd
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=cmd,
-        health=_fresh_health(),
     )
 
     assert decision.state == GuardrailState.PASS
     assert decision.reason == "forward_guard_inactive"
     assert decision.cmd_vel == cmd
-
-
-def test_missing_previous_frame_returns_init_zero(image_pair: tuple[Image, Image]) -> None:
-    policy = _policy()
-
-    decision = policy.evaluate(
-        previous_image=image_pair[0],
-        current_image=image_pair[1],
-        incoming_cmd_vel=_forward_cmd(),
-        health=_fresh_health(has_previous_frame=False),
-    )
-
-    assert decision.state == GuardrailState.INIT
-    assert decision.reason == "missing_previous_frame"
-    assert decision.cmd_vel == Twist.zero()
-
-
-def test_stale_image_health_degrades_to_zero(image_pair: tuple[Image, Image]) -> None:
-    policy = _policy()
-
-    decision = policy.evaluate(
-        previous_image=image_pair[0],
-        current_image=image_pair[1],
-        incoming_cmd_vel=_forward_cmd(),
-        health=_fresh_health(image_fresh=False),
-    )
-
-    assert decision.state == GuardrailState.SENSOR_DEGRADED
-    assert decision.reason == "image_not_fresh"
-    assert decision.cmd_vel == Twist.zero()
-    assert decision.publish_immediately is True
-
-
-def test_frame_shape_mismatch_degrades_to_zero() -> None:
-    policy = _policy()
-
-    decision = policy.evaluate(
-        previous_image=_textured_gray_image(width=160, height=120),
-        current_image=_textured_gray_image(width=160, height=90),
-        incoming_cmd_vel=_forward_cmd(),
-        health=_fresh_health(),
-    )
-
-    assert decision.state == GuardrailState.SENSOR_DEGRADED
-    assert decision.reason == "frame_shape_mismatch"
-    assert decision.cmd_vel == Twist.zero()
-    assert decision.publish_immediately is True
-
-
-def test_frozen_camera_degrades_within_n_frames() -> None:
-    policy = _policy(static_scene_frame_count=3)
-    frame = _textured_gray_image()
-    cmd = _forward_cmd()
-
-    decisions = [
-        policy.evaluate(
-            previous_image=frame,
-            current_image=frame,
-            incoming_cmd_vel=cmd,
-            health=_fresh_health(),
-        )
-        for _ in range(5)
-    ]
-
-    assert all(d.state == GuardrailState.PASS for d in decisions[:2])
-    for decision in decisions[2:]:
-        assert decision.state == GuardrailState.SENSOR_DEGRADED
-        assert decision.reason == "static_scene"
-        assert decision.cmd_vel == Twist.zero()
-        assert decision.publish_immediately is True
-
-
-def test_reset_clears_static_scene_counter() -> None:
-    policy = _policy(static_scene_frame_count=2)
-    frame = _textured_gray_image()
-    cmd = _forward_cmd()
-
-    def evaluate_identical() -> GuardrailState:
-        return policy.evaluate(
-            previous_image=frame,
-            current_image=frame,
-            incoming_cmd_vel=cmd,
-            health=_fresh_health(),
-        ).state
-
-    assert evaluate_identical() == GuardrailState.PASS
-    assert evaluate_identical() == GuardrailState.SENSOR_DEGRADED
-
-    policy.reset()
-
-    assert evaluate_identical() == GuardrailState.PASS
 
 
 @pytest.mark.parametrize(
@@ -272,7 +162,6 @@ def test_bad_previous_or_current_roi_fail_closes(
         previous_image=previous_image,
         current_image=current_image,
         incoming_cmd_vel=_forward_cmd(),
-        health=_fresh_health(),
     )
 
     assert decision.state == GuardrailState.SENSOR_DEGRADED
@@ -311,13 +200,11 @@ def test_caution_hysteresis_reaches_clamp(image_pair: tuple[Image, Image], mocke
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=_forward_cmd(),
-        health=_fresh_health(),
     )
     second = policy.evaluate(
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=_forward_cmd(),
-        health=_fresh_health(),
     )
 
     assert first.state == GuardrailState.PASS
@@ -342,13 +229,11 @@ def test_repeated_stop_strength_frames_reach_stop_latched(
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=cmd,
-        health=_fresh_health(),
     )
     second = policy.evaluate(
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=cmd,
-        health=_fresh_health(),
     )
 
     assert first.state == GuardrailState.CLAMP
@@ -374,19 +259,16 @@ def test_forward_deadband_does_not_reset_hysteresis(
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=_forward_cmd(0.4),
-        health=_fresh_health(),
     )
     inactive = policy.evaluate(
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=_forward_cmd(0.03),
-        health=_fresh_health(),
     )
     third = policy.evaluate(
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=_forward_cmd(0.4),
-        health=_fresh_health(),
     )
 
     assert first.state == GuardrailState.PASS
@@ -405,7 +287,6 @@ def test_clamp_preserves_angular_terms(image_pair: tuple[Image, Image], mocker) 
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=cmd,
-        health=_fresh_health(),
     )
 
     assert decision.state == GuardrailState.CLAMP
@@ -424,7 +305,6 @@ def test_stop_zeroes_only_linear_x(image_pair: tuple[Image, Image], mocker) -> N
         previous_image=image_pair[0],
         current_image=image_pair[1],
         incoming_cmd_vel=cmd,
-        health=_fresh_health(),
     )
 
     assert decision.state == GuardrailState.STOP_LATCHED

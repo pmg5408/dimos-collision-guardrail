@@ -29,15 +29,6 @@ from dimos.msgs.sensor_msgs.Image import Image
 GrayImage = NDArray[np.uint8]
 
 
-@dataclass(frozen=True)
-class GuardrailHealth:
-    has_previous_frame: bool
-    image_fresh: bool
-    cmd_fresh: bool
-    risk_fresh: bool
-    frame_pair_fresh: bool
-
-
 @dataclass
 class GuardrailDecision:
     """Policy result consumed by the guardrail worker.
@@ -67,16 +58,16 @@ class OpticalFlowMagnitudePolicyConfig:
     occlusion_extreme_fraction_threshold: float
     caution_flow_magnitude_threshold: float
     stop_flow_magnitude_threshold: float
-    static_scene_frame_count: int
 
 
 class GuardrailPolicy(Protocol):
+    """Detector contract."""
+
     def evaluate(
         self,
         previous_image: Image,
         current_image: Image,
         incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
     ) -> GuardrailDecision: ...
 
     def reset(self) -> None: ...
@@ -102,56 +93,19 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
     ) -> None:
         self._config = config
         self._hysteresis = hysteresis
-        self._static_frame_hits = 0
 
     def evaluate(
         self,
         previous_image: Image,
         current_image: Image,
         incoming_cmd_vel: Twist,
-        health: GuardrailHealth,
     ) -> GuardrailDecision:
-        if not health.has_previous_frame:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.INIT,
-                "missing_previous_frame",
-                risk_score=0.0,
-            )
-
-        if not health.image_fresh:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "image_not_fresh",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
-
-        if not health.frame_pair_fresh:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "frame_pair_stale",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
-
         forward_speed = float(incoming_cmd_vel.linear.x)
         if forward_speed <= self._config.forward_motion_deadband_mps:
             return self._pass_decision(incoming_cmd_vel, "forward_guard_inactive", 0.0)
 
         previous_gray = self._to_resized_gray(previous_image)
         current_gray = self._to_resized_gray(current_image)
-
-        if previous_gray.shape != current_gray.shape:
-            self._hysteresis.reset()
-            return self._zero_decision(
-                GuardrailState.SENSOR_DEGRADED,
-                "frame_shape_mismatch",
-                risk_score=1.0,
-                publish_immediately=True,
-            )
 
         previous_roi, current_roi = self._extract_forward_rois(previous_gray, current_gray)
 
@@ -173,19 +127,6 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
                 risk_score=1.0,
                 publish_immediately=True,
             )
-
-        if np.array_equal(previous_roi, current_roi):
-            self._static_frame_hits += 1
-            if self._static_frame_hits >= self._config.static_scene_frame_count:
-                self._hysteresis.reset()
-                return self._zero_decision(
-                    GuardrailState.SENSOR_DEGRADED,
-                    "static_scene",
-                    risk_score=1.0,
-                    publish_immediately=True,
-                )
-        else:
-            self._static_frame_hits = 0
 
         mean_flow_magnitude = self._mean_flow_magnitude(previous_roi, current_roi)
         risk_level = self._risk_level(mean_flow_magnitude)
@@ -218,7 +159,6 @@ class OpticalFlowMagnitudeGuardrailPolicy(GuardrailPolicy):
 
     def reset(self) -> None:
         self._hysteresis.reset()
-        self._static_frame_hits = 0
 
     def _to_resized_gray(self, image: Image) -> GrayImage:
         gray = cast("GrayImage", image.to_grayscale().data)
