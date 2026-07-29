@@ -44,6 +44,7 @@ def main() -> None:
     base = _texture()
 
     guardrail = RGBCollisionGuardrail(
+        policy={"kind": "optical_flow"},
         decision_hz=10.0,
         # Generous freshness windows: this demo is about the flow -> hysteresis
         # ladder, not the staleness fail-closed paths (those have their own tests).

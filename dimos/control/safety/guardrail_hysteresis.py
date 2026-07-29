@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from dimos.control.safety.guardrail_types import GuardrailState
 
 
@@ -37,12 +39,15 @@ class RiskLevel(IntEnum):
     STOP = 2
 
 
-@dataclass(frozen=True)
-class HysteresisConfig:
-    caution_frame_count: int
-    stop_frame_count: int
-    clear_frame_count: int
-    stop_release_frame_count: int
+class HysteresisConfig(BaseModel):
+    """How many consecutive observations each transition requires."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    caution_frame_count: int = Field(default=2, ge=1)
+    stop_frame_count: int = Field(default=2, ge=1)
+    clear_frame_count: int = Field(default=3, ge=1)
+    stop_release_frame_count: int = Field(default=2, ge=1)
 
 
 @dataclass

@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 import queue
 import threading
 import time
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 import pytest
@@ -47,14 +47,16 @@ def _black_gray_image(*, width: int = 160, height: int = 120) -> Image:
 
 def _start_guardrail(
     policy: Any | None = None,
-    **config_overrides: float,
+    **config_overrides: Any,
 ) -> tuple[
     RGBCollisionGuardrail,
     FakeTransport[Image],
     FakeTransport[Twist],
     queue.Queue[tuple[float, Twist]],
 ]:
-    config: dict[str, float] = {
+    config: dict[str, Any] = {
+        # A configured detector is required; policy_override replaces it when given.
+        "policy": {"kind": "optical_flow"},
         "decision_hz": 20.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
@@ -136,7 +138,7 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
         decision_hz=20.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
-        caution_frame_count=1,
+        hysteresis={"caution_frame_count": 1},
     )
     guarded = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
@@ -169,7 +171,7 @@ def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() ->
         decision_hz=30.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
-        stop_frame_count=1,
+        hysteresis={"stop_frame_count": 1},
     )
     stop_cmd = Twist(linear=[0.0, 0.0, 0.0], angular=[0.0, 0.0, 0.2])
 
