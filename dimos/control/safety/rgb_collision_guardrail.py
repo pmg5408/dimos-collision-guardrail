@@ -30,12 +30,12 @@ from dimos.control.safety.guardrail_hysteresis import (
 )
 from dimos.control.safety.guardrail_policy import (
     GuardrailPolicy,
-    OpticalFlowMagnitudePolicyConfig,
     RiskAssessment,
     RiskResult,
     RiskUnavailable,
 )
 from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
+from dimos.control.safety.policies import OpticalFlowMagnitudePolicyConfig
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out

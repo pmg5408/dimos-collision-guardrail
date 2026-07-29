@@ -22,10 +22,12 @@ from pydantic import ValidationError
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
-    OpticalFlowMagnitudeGuardrailPolicy,
-    OpticalFlowMagnitudePolicyConfig,
     RiskAssessment,
     RiskUnavailable,
+)
+from dimos.control.safety.policies import (
+    OpticalFlowMagnitudeGuardrailPolicy,
+    OpticalFlowMagnitudePolicyConfig,
 )
 from dimos.control.safety.test_utils import (
     _textured_gray_image,

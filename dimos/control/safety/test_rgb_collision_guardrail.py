@@ -24,11 +24,11 @@ import pytest
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
-    OpticalFlowMagnitudeGuardrailPolicy,
     RiskAssessment,
     RiskResult,
     RiskUnavailable,
 )
+from dimos.control.safety.policies import OpticalFlowMagnitudeGuardrailPolicy
 from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
 from dimos.control.safety.rgb_collision_guardrail import (
     RGBCollisionGuardrail,
