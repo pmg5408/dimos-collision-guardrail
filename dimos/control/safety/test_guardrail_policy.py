@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
@@ -30,21 +33,41 @@ from dimos.control.safety.test_utils import (
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 
 
-def _policy() -> OpticalFlowMagnitudeGuardrailPolicy:
-    return OpticalFlowMagnitudeGuardrailPolicy(
-        OpticalFlowMagnitudePolicyConfig(
-            flow_downsample_width_px=160,
-            forward_roi_top_fraction=0.45,
-            forward_roi_bottom_fraction=0.95,
-            forward_roi_width_fraction=0.5,
-            low_texture_variance_threshold=150.0,
-            occlusion_dark_pixel_threshold=20,
-            occlusion_bright_pixel_threshold=235,
-            occlusion_extreme_fraction_threshold=0.9,
-            caution_flow_magnitude_threshold=0.8,
-            stop_flow_magnitude_threshold=1.5,
-        )
-    )
+def _policy(**overrides: Any) -> OpticalFlowMagnitudeGuardrailPolicy:
+    return OpticalFlowMagnitudeGuardrailPolicy(OpticalFlowMagnitudePolicyConfig(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_message"),
+    [
+        pytest.param(
+            {"forward_roi_top_fraction": 0.9, "forward_roi_bottom_fraction": 0.5},
+            "forward_roi_top_fraction",
+            id="inverted_roi_bounds",
+        ),
+        pytest.param(
+            {"occlusion_dark_pixel_threshold": 240, "occlusion_bright_pixel_threshold": 10},
+            "occlusion_dark_pixel_threshold",
+            id="inverted_occlusion_thresholds",
+        ),
+        pytest.param(
+            {"caution_flow_magnitude_threshold": 2.0, "stop_flow_magnitude_threshold": 1.0},
+            "caution_flow_magnitude_threshold",
+            id="caution_above_stop",
+        ),
+    ],
+)
+def test_contradictory_settings_are_rejected(
+    overrides: dict[str, Any],
+    expected_message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=expected_message):
+        OpticalFlowMagnitudePolicyConfig(**overrides)
+
+
+def test_unknown_setting_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="stop_flow_magnitude_threshhold"):
+        OpticalFlowMagnitudePolicyConfig(stop_flow_magnitude_threshhold=1.5)
 
 
 def _uniform_gray_image(value: int, *, width: int = 160, height: int = 120) -> Image:

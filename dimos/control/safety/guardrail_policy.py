@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, Self, cast
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.msgs.sensor_msgs.Image import Image
@@ -45,18 +46,51 @@ class RiskUnavailable:
 RiskResult = RiskAssessment | RiskUnavailable
 
 
-@dataclass(frozen=True)
-class OpticalFlowMagnitudePolicyConfig:
-    flow_downsample_width_px: int
-    forward_roi_top_fraction: float
-    forward_roi_bottom_fraction: float
-    forward_roi_width_fraction: float
-    low_texture_variance_threshold: float
-    occlusion_dark_pixel_threshold: int
-    occlusion_bright_pixel_threshold: int
-    occlusion_extreme_fraction_threshold: float
-    caution_flow_magnitude_threshold: float
-    stop_flow_magnitude_threshold: float
+class OpticalFlowMagnitudePolicyConfig(BaseModel):
+    """How the optical-flow detector reads a frame pair and scores it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Preprocessing
+    flow_downsample_width_px: int = Field(default=160, ge=32)
+
+    # Forward ROI geometry
+    forward_roi_top_fraction: float = Field(default=0.45, ge=0.0, le=1.0)
+    forward_roi_bottom_fraction: float = Field(default=0.95, ge=0.0, le=1.0)
+    forward_roi_width_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
+
+    # Whether the ROI is measurable at all
+    low_texture_variance_threshold: float = Field(default=150.0, ge=0.0)
+    occlusion_dark_pixel_threshold: int = Field(default=20, ge=0, le=255)
+    occlusion_bright_pixel_threshold: int = Field(default=235, ge=0, le=255)
+    occlusion_extreme_fraction_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
+
+    # Flow magnitude to risk band
+    caution_flow_magnitude_threshold: float = Field(default=0.8, ge=0.0)
+    stop_flow_magnitude_threshold: float = Field(default=1.5, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> Self:
+        if self.forward_roi_top_fraction >= self.forward_roi_bottom_fraction:
+            raise ValueError(
+                "forward_roi_top_fraction must be less than forward_roi_bottom_fraction"
+            )
+
+        if self.occlusion_dark_pixel_threshold >= self.occlusion_bright_pixel_threshold:
+            raise ValueError(
+                "occlusion_dark_pixel_threshold must be less than occlusion_bright_pixel_threshold"
+            )
+
+        if self.caution_flow_magnitude_threshold > self.stop_flow_magnitude_threshold:
+            raise ValueError(
+                "caution_flow_magnitude_threshold must be less than or equal to "
+                "stop_flow_magnitude_threshold"
+            )
+
+        return self
+
+    def build(self) -> GuardrailPolicy:
+        return OpticalFlowMagnitudeGuardrailPolicy(self)
 
 
 class GuardrailPolicy(Protocol):

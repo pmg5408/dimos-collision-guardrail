@@ -17,10 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Condition, Event, Thread
 import time
-from typing import Any, Self
+from typing import Any
 
 import numpy as np
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field
 from reactivex.disposable import CompositeDisposable, Disposable
 
 from dimos.control.safety.guardrail_hysteresis import (
@@ -30,7 +30,6 @@ from dimos.control.safety.guardrail_hysteresis import (
 )
 from dimos.control.safety.guardrail_policy import (
     GuardrailPolicy,
-    OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
     RiskAssessment,
     RiskResult,
@@ -69,44 +68,17 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     forward_motion_deadband_mps: float = Field(default=0.05, ge=0.0)
     clamp_forward_speed_mps: float = Field(default=0.1, ge=0.0)
 
-    # Forward ROI geometry
-    flow_downsample_width_px: int = Field(default=160, ge=32)
-    forward_roi_top_fraction: float = Field(default=0.45, ge=0.0, le=1.0)
-    forward_roi_bottom_fraction: float = Field(default=0.95, ge=0.0, le=1.0)
-    forward_roi_width_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
-
-    # Image-quality checks
-    low_texture_variance_threshold: float = Field(default=150.0, ge=0.0)
-    occlusion_dark_pixel_threshold: int = Field(default=20, ge=0, le=255)
-    occlusion_bright_pixel_threshold: int = Field(default=235, ge=0, le=255)
-    occlusion_extreme_fraction_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
-
-    # Flow thresholds
-    caution_flow_magnitude_threshold: float = Field(default=0.8, ge=0.0)
-    stop_flow_magnitude_threshold: float = Field(default=1.5, ge=0.0)
     static_scene_frame_count: int = Field(default=3, ge=1)
 
+    # How risk is measured, and how measurements become a state.
+    # The concrete type is only because optical flow is the sole detector today. A
+    # second one makes this a discriminated union of their config models, selected
+    # by a tag in the config; the module keeps calling build() on whichever arrived
+    # and never learns which that was.
+    policy: OpticalFlowMagnitudePolicyConfig = Field(
+        default_factory=OpticalFlowMagnitudePolicyConfig
+    )
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
-
-    @model_validator(mode="after")
-    def validate_thresholds(self) -> Self:
-        if self.forward_roi_top_fraction >= self.forward_roi_bottom_fraction:
-            raise ValueError(
-                "forward_roi_top_fraction must be less than forward_roi_bottom_fraction"
-            )
-
-        if self.occlusion_dark_pixel_threshold >= self.occlusion_bright_pixel_threshold:
-            raise ValueError(
-                "occlusion_dark_pixel_threshold must be less than occlusion_bright_pixel_threshold"
-            )
-
-        if self.caution_flow_magnitude_threshold > self.stop_flow_magnitude_threshold:
-            raise ValueError(
-                "caution_flow_magnitude_threshold must be less than or equal to "
-                "stop_flow_magnitude_threshold"
-            )
-
-        return self
 
 
 @dataclass
@@ -178,24 +150,9 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._runtime_state = _GuardrailRuntimeState()
         self._stop_event = Event()
         self._thread = None
-        self._policy = policy_override if policy_override is not None else self._build_policy()
+        self._policy = policy_override if policy_override is not None else self.config.policy.build()
         self._hysteresis = RiskHysteresis(self.config.hysteresis)
         self._static_frame_hits = 0
-
-    def _build_policy(self) -> GuardrailPolicy:
-        policy_config = OpticalFlowMagnitudePolicyConfig(
-            flow_downsample_width_px=self.config.flow_downsample_width_px,
-            forward_roi_top_fraction=self.config.forward_roi_top_fraction,
-            forward_roi_bottom_fraction=self.config.forward_roi_bottom_fraction,
-            forward_roi_width_fraction=self.config.forward_roi_width_fraction,
-            low_texture_variance_threshold=self.config.low_texture_variance_threshold,
-            occlusion_dark_pixel_threshold=self.config.occlusion_dark_pixel_threshold,
-            occlusion_bright_pixel_threshold=self.config.occlusion_bright_pixel_threshold,
-            occlusion_extreme_fraction_threshold=self.config.occlusion_extreme_fraction_threshold,
-            caution_flow_magnitude_threshold=self.config.caution_flow_magnitude_threshold,
-            stop_flow_magnitude_threshold=self.config.stop_flow_magnitude_threshold,
-        )
-        return OpticalFlowMagnitudeGuardrailPolicy(policy_config)
 
     @rpc
     def start(self) -> None:
