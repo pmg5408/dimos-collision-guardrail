@@ -53,8 +53,8 @@ def _policy(**overrides: Any) -> OpticalFlowMagnitudeGuardrailPolicy:
             id="inverted_occlusion_thresholds",
         ),
         pytest.param(
-            {"caution_flow_magnitude_threshold": 2.0, "stop_flow_magnitude_threshold": 1.0},
-            "caution_flow_magnitude_threshold",
+            {"caution_score_threshold": 2.0, "stop_score_threshold": 1.0},
+            "caution_score_threshold",
             id="caution_above_stop",
         ),
     ],
@@ -175,7 +175,7 @@ def test_assessment_score_is_the_measured_flow_magnitude(
     mocker,
 ) -> None:
     policy = _policy()
-    mocker.patch.object(policy, "_mean_flow_magnitude", return_value=1.75)
+    mocker.patch.object(policy, "_measure", return_value=1.75)
 
     result = policy.evaluate(
         previous_image=image_pair[0],

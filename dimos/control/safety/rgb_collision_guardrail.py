@@ -35,7 +35,7 @@ from dimos.control.safety.guardrail_policy import (
     RiskUnavailable,
 )
 from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
-from dimos.control.safety.policies import OpticalFlowMagnitudePolicyConfig
+from dimos.control.safety.policies import AnyPolicyConfig
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
@@ -70,14 +70,9 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
 
     static_scene_frame_count: int = Field(default=3, ge=1)
 
-    # How risk is measured, and how measurements become a state.
-    # The concrete type is only because optical flow is the sole detector today. A
-    # second one makes this a discriminated union of their config models, selected
-    # by a tag in the config; the module keeps calling build() on whichever arrived
-    # and never learns which that was.
-    policy: OpticalFlowMagnitudePolicyConfig = Field(
-        default_factory=OpticalFlowMagnitudePolicyConfig
-    )
+    # Which detector measures risk, selected by its `kind` tag; the module builds
+    # whichever config arrives and never learns which. Required.
+    policy: AnyPolicyConfig
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
 
 

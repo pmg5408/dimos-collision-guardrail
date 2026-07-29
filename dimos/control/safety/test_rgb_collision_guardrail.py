@@ -21,6 +21,7 @@ import time
 from typing import Any, TypeVar
 
 import pytest
+from pydantic import ValidationError
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
@@ -28,8 +29,11 @@ from dimos.control.safety.guardrail_policy import (
     RiskResult,
     RiskUnavailable,
 )
-from dimos.control.safety.policies import OpticalFlowMagnitudeGuardrailPolicy
 from dimos.control.safety.guardrail_types import GuardrailDecision, GuardrailState
+from dimos.control.safety.policies import (
+    FrameDifferenceGuardrailPolicy,
+    OpticalFlowMagnitudeGuardrailPolicy,
+)
 from dimos.control.safety.rgb_collision_guardrail import (
     RGBCollisionGuardrail,
     _InputSnapshot,
@@ -79,6 +83,7 @@ class CountingPassPolicy:
 @pytest.fixture
 def module() -> Iterator[RGBCollisionGuardrail]:
     guardrail = RGBCollisionGuardrail(
+        policy={"kind": "optical_flow"},
         decision_hz=50.0,
         command_timeout_s=0.05,
         image_timeout_s=0.05,
@@ -127,6 +132,8 @@ def _start_threaded_guardrail(
     **config_overrides: Any,
 ) -> tuple[RGBCollisionGuardrail, FakeTransport[Image], FakeTransport[Twist], queue.Queue[Twist]]:
     config: dict[str, Any] = {
+        # A configured detector is required; policy_override replaces it below.
+        "policy": {"kind": "optical_flow"},
         "decision_hz": 50.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
@@ -238,18 +245,33 @@ def test_valid_inputs_are_not_rejected(module: RGBCollisionGuardrail) -> None:
     assert module._input_failure_decision(_valid_snapshot()) is None
 
 
-def test_config_builds_the_default_detector() -> None:
-    guardrail = RGBCollisionGuardrail()
+def test_config_requires_a_detector() -> None:
+    with pytest.raises(ValidationError):
+        RGBCollisionGuardrail()
 
+
+def test_config_selects_the_detector_by_kind() -> None:
+    guardrail = RGBCollisionGuardrail(policy={"kind": "optical_flow"})
     try:
         assert isinstance(guardrail._policy, OpticalFlowMagnitudeGuardrailPolicy)
     finally:
         guardrail._close_module()
 
+    guardrail = RGBCollisionGuardrail(policy={"kind": "frame_difference"})
+    try:
+        assert isinstance(guardrail._policy, FrameDifferenceGuardrailPolicy)
+    finally:
+        guardrail._close_module()
+
+
+def test_config_rejects_an_unknown_detector_kind() -> None:
+    with pytest.raises(ValidationError):
+        RGBCollisionGuardrail(policy={"kind": "sonar"})
+
 
 def test_policy_override_replaces_the_configured_detector() -> None:
     policy = CountingPassPolicy()
-    guardrail = RGBCollisionGuardrail(policy_override=policy)
+    guardrail = RGBCollisionGuardrail(policy={"kind": "optical_flow"}, policy_override=policy)
 
     try:
         assert guardrail._policy is policy

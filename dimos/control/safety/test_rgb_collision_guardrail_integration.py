@@ -55,6 +55,8 @@ def _start_guardrail(
     queue.Queue[tuple[float, Twist]],
 ]:
     config: dict[str, Any] = {
+        # A configured detector is required; policy_override replaces it when given.
+        "policy": {"kind": "optical_flow"},
         "decision_hz": 20.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
