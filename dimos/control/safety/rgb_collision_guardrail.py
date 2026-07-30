@@ -60,8 +60,6 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     # Freshness and fail-closed behavior
     command_timeout_s: float = Field(default=0.25, gt=0.0)
     image_timeout_s: float = Field(default=0.25, gt=0.0)
-    fail_closed_on_missing_image: bool = True
-    publish_zero_on_stop: bool = True
     frame_pair_max_gap_s: float = Field(default=0.2, gt=0.0)
 
     # Motion gating
@@ -216,7 +214,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                 )
             else:
                 self._thread = None
-        if was_running and self.config.publish_zero_on_stop:
+        if was_running:
             self.safe_cmd_vel.publish(Twist.zero())
 
         logger.info("RGB guardrail stopped")
@@ -389,15 +387,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
         current_image = snapshot.current_image
         if current_image is None:
-            if self.config.fail_closed_on_missing_image:
-                return self._build_init_decision("waiting_for_first_image", snapshot)
-            return None
+            return self._build_init_decision("waiting_for_first_image", snapshot)
 
         previous_image = snapshot.previous_image
         if previous_image is None:
-            if self.config.fail_closed_on_missing_image:
-                return self._build_init_decision("waiting_for_frame_pair", snapshot)
-            return None
+            return self._build_init_decision("waiting_for_frame_pair", snapshot)
 
         if not snapshot.image_fresh:
             return self._build_degraded_decision("image_stale", snapshot)
