@@ -39,7 +39,7 @@ from dimos.control.safety.rgb_collision_guardrail import (
     RGBCollisionGuardrail,
     _InputSnapshot,
 )
-from dimos.control.safety.test_utils import (
+from dimos.control.safety.tests.test_utils import (
     FakeTransport,
     SequencePolicy,
     _assessment,

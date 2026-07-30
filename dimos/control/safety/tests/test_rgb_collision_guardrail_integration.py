@@ -25,7 +25,7 @@ import pytest
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.rgb_collision_guardrail import RGBCollisionGuardrail
-from dimos.control.safety.test_utils import (
+from dimos.control.safety.tests.test_utils import (
     FakeTransport,
     SequencePolicy,
     _assessment,

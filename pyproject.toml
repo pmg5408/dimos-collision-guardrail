@@ -24,6 +24,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["dimos*"]
+# `dimos*` would otherwise match the test packages too, installing test modules
+# and their fakes into the site-packages of anyone who pip installs this.
+exclude = ["*.tests", "*.tests.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["dimos/control/safety"]

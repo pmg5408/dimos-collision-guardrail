@@ -25,7 +25,7 @@ from dimos.control.safety.policies.frame_difference import (
     FrameDifferenceGuardrailPolicy,
     FrameDifferencePolicyConfig,
 )
-from dimos.control.safety.test_utils import _textured_gray_image
+from dimos.control.safety.tests.test_utils import _textured_gray_image
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 
 

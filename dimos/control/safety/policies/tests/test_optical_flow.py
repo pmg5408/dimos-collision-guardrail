@@ -30,7 +30,7 @@ from dimos.control.safety.policies import (
     OpticalFlowMagnitudeGuardrailPolicy,
     OpticalFlowMagnitudePolicyConfig,
 )
-from dimos.control.safety.test_utils import (
+from dimos.control.safety.tests.test_utils import (
     _textured_gray_image,
 )
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
