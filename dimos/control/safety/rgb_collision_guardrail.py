@@ -50,8 +50,6 @@ logger = setup_logger()
 
 
 class RGBCollisionGuardrailConfig(ModuleConfig):
-    # Reject unknown keys: a stale or mistyped setting is otherwise dropped in
-    # silence and the guardrail runs on defaults nobody chose.
     model_config = ConfigDict(extra="forbid")
 
     # Scheduling
@@ -69,7 +67,7 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     static_scene_frame_count: int = Field(default=3, ge=1)
 
     # Which detector measures risk, selected by its `kind` tag; the module builds
-    # whichever config arrives and never learns which. Required.
+    # whichever config arrives. Required.
     policy: AnyPolicyConfig
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
 
@@ -86,18 +84,13 @@ class _GuardrailRuntimeState:
     state: GuardrailState = GuardrailState.INIT
     image_generation: int = 0
     last_evaluated_image_generation: int = -1
-    # Set by the callbacks, cleared by the worker. Unlike the pending flags this
-    # replaced, it never decides whether to publish -- only whether to sleep first.
+    # Set by the callbacks, cleared by the worker.
     wake_requested: bool = False
 
 
 @dataclass(frozen=True)
 class _InputSnapshot:
-    """A consistent read of the incoming streams, taken under the lock.
-
-    Captured so the expensive work of a decision runs outside the lock against
-    values that cannot change underneath it.
-    """
+    """A consistent read of the incoming streams, taken under the lock."""
 
     previous_image: Image | None
     current_image: Image | None
@@ -116,9 +109,8 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     forward motion is passed, clamped, or stopped according to the collision risk
     the detector reports.
 
-    Input callbacks store the newest value and wake the worker; one thread makes
-    every decision and is the sole writer of the output stream. It wakes whenever
-    input arrives and at least every 1/min_publish_hz, and publishes every time.
+    Input callbacks store the newest value and wake the worker; it also wakes
+    at least every 1/min_publish_hz, and publishes every time.
     """
 
     default_config = RGBCollisionGuardrailConfig
@@ -206,8 +198,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         if self._thread is not None:
             self._thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
             if self._thread.is_alive():
-                # Keep the handle so start() still refuses. Clearing it here would let a
-                # second worker run alongside this one, both writing the output stream.
                 logger.warning(
                     "RGB guardrail worker thread did not stop within timeout",
                     timeout_s=_THREAD_JOIN_TIMEOUT_S,
@@ -335,11 +325,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         previous_image = snapshot.previous_image
         current_image = snapshot.current_image
         if previous_image is None or current_image is None:
-            # _input_failure_decision already rejected a missing frame, so this is
-            # unreachable. It stands because that guarantee lives in another method
-            # and nothing enforces it: if a later edit breaks it, the detector must
-            # not be handed a None, and the guardrail must not raise on the command
-            # path. Fail closed instead.
             self._hysteresis.reset()
             return self._build_degraded_decision("frame_pair_unavailable", snapshot)
 
