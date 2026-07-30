@@ -55,7 +55,7 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     model_config = ConfigDict(extra="forbid")
 
     # Scheduling
-    decision_hz: float = Field(default=10.0, gt=0.0)
+    min_publish_hz: float = Field(default=10.0, gt=0.0)
 
     # Freshness and fail-closed behavior
     command_timeout_s: float = Field(default=0.25, gt=0.0)
@@ -120,7 +120,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
     Input callbacks store the newest value and wake the worker; one thread makes
     every decision and is the sole writer of the output stream. It wakes whenever
-    input arrives and at least every 1/decision_hz, and publishes every time.
+    input arrives and at least every 1/min_publish_hz, and publishes every time.
     """
 
     default_config = RGBCollisionGuardrailConfig
@@ -188,7 +188,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
         logger.info(
             "RGB guardrail started",
-            decision_hz=self.config.decision_hz,
+            min_publish_hz=self.config.min_publish_hz,
             command_timeout_s=self.config.command_timeout_s,
             image_timeout_s=self.config.image_timeout_s,
             frame_pair_max_gap_s=self.config.frame_pair_max_gap_s,
@@ -271,7 +271,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                 self.safe_cmd_vel.publish(decision.cmd_vel)
 
     def _tick_period_s(self) -> float:
-        return 1.0 / self.config.decision_hz
+        return 1.0 / self.config.min_publish_hz
 
     def _take_input_snapshot_locked(self, now: float) -> _InputSnapshot:
         runtime_state = self._runtime_state
