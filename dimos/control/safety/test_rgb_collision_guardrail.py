@@ -484,6 +484,119 @@ def test_stop_keeps_the_thread_handle_when_the_join_times_out(mocker: MockerFixt
         guardrail.stop()
 
 
+def test_stop_zero_is_not_overwritten_by_an_in_flight_decision(mocker: MockerFixture) -> None:
+    mocker.patch(
+        "dimos.control.safety.rgb_collision_guardrail._THREAD_JOIN_TIMEOUT_S",
+        0.05,
+    )
+    release = threading.Event()
+
+    class BlockingPolicy:
+        def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
+            release.wait()
+            return RiskAssessment(level=RiskLevel.CLEAR, score=0.0)
+
+        def reset(self) -> None:
+            pass
+
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        BlockingPolicy(),
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+    forward_cmd = _cmd(0.4, angular_z=0.3)
+
+    try:
+        # Park the worker inside evaluate() with a PASS-speed command already
+        # snapshotted, so it has a non-zero command to publish once it gets out.
+        cmd_transport.publish(forward_cmd)
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+        time.sleep(0.1)
+
+        guardrail.stop()
+
+        # The join timed out with the worker still inside evaluate(). Letting it
+        # finish now is exactly the race: without the epoch check it would publish
+        # forward_cmd after stop() already published zero, leaving the robot latched
+        # onto a moving command.
+        release.set()
+        time.sleep(0.2)
+    finally:
+        release.set()
+
+    published: list[Twist] = []
+    while True:
+        try:
+            published.append(outputs.get_nowait())
+        except queue.Empty:
+            break
+
+    assert published, "expected at least the final zero"
+    assert published[-1] == Twist.zero()
+    assert forward_cmd not in published[published.index(Twist.zero()) :]
+
+
+def test_a_decision_reaching_the_output_after_stop_is_dropped() -> None:
+    """The interleaving stop() cannot wait out.
+
+    A worker can pass its own stop check, have stop() run to completion underneath it,
+    and only then reach its publish. That decision must not land behind the final zero.
+    Driven directly so the ordering is fixed rather than raced for.
+    """
+    policy = CountingPassPolicy()
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
+    forward_cmd = _cmd(0.4, angular_z=0.3)
+
+    cmd_transport.publish(forward_cmd)
+    image_transport.publish(_textured_gray_image())
+    image_transport.publish(_textured_gray_image(shift_x=2))
+    _wait_for_output(outputs, lambda twist: twist == forward_cmd)
+
+    guardrail.stop()
+
+    guardrail._publish_unless_stopping(forward_cmd)
+
+    published: list[Twist] = []
+    while True:
+        try:
+            published.append(outputs.get_nowait())
+        except queue.Empty:
+            break
+
+    assert published, "expected at least the final zero"
+    assert published[-1] == Twist.zero()
+
+
+def test_restart_reopens_the_output_stream() -> None:
+    """A stopped guardrail closes its output; a restarted one has to open it again."""
+    policy = CountingPassPolicy()
+    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
+        policy,
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+    forward_cmd = _cmd(0.4, angular_z=0.3)
+
+    try:
+        cmd_transport.publish(forward_cmd)
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+        _wait_for_output(outputs, lambda twist: twist == forward_cmd)
+    finally:
+        guardrail.stop()
+
+    guardrail.start()
+    try:
+        cmd_transport.publish(forward_cmd)
+        image_transport.publish(_textured_gray_image())
+        image_transport.publish(_textured_gray_image(shift_x=2))
+
+        assert _wait_for_output(outputs, lambda twist: twist == forward_cmd) == forward_cmd
+    finally:
+        guardrail.stop()
+
+
 def test_command_arriving_during_evaluation_is_not_delayed_to_the_next_tick() -> None:
     class SlowPolicy:
         def evaluate(self, previous_image: Image, current_image: Image) -> RiskResult:
@@ -792,5 +905,48 @@ def test_restart_resets_runtime_state() -> None:
         with guardrail._condition:
             state_after_restart: GuardrailState = guardrail._runtime_state.state
         assert state_after_restart == GuardrailState.INIT
+    finally:
+        guardrail.stop()
+
+
+def test_restart_clears_every_piece_of_accumulated_state() -> None:
+    """Pins the full list _reset_run_state is responsible for.
+
+    Each of these lives in a different object, so forgetting one leaks a latched
+    stop or a partial frame streak into the next run and nothing else notices.
+    """
+    policy = SequencePolicy([_assessment(RiskLevel.STOP)])
+    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
+        policy,
+        hysteresis={"stop_frame_count": 1},
+        static_scene_frame_count=3,
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+
+    # One repeated frame banks a frozen-frame hit without reaching the threshold that
+    # would trip SENSOR_DEGRADED, so the latch and the streak are dirty at the same time.
+    frame = _textured_gray_image()
+    try:
+        cmd_transport.publish(_cmd(0.4))
+        image_transport.publish(frame)
+        image_transport.publish(frame)
+        _wait_for_decision(guardrail, lambda d: d.state == GuardrailState.STOP_LATCHED)
+    finally:
+        guardrail.stop()
+
+    assert guardrail._static_frame_hits == 1
+    # observe() is the only read of the hysteresis; a latched machine refuses to
+    # release on one clear observation, a freshly reset one is already at PASS.
+    assert guardrail._hysteresis.observe(RiskLevel.CLEAR) == GuardrailState.STOP_LATCHED
+
+    guardrail.start()
+    try:
+        assert guardrail._static_frame_hits == 0
+        assert guardrail._hysteresis.observe(RiskLevel.CLEAR) == GuardrailState.PASS
+        with guardrail._condition:
+            assert guardrail._runtime_state.state == GuardrailState.INIT
+            assert guardrail._runtime_state.last_decision is None
+            assert guardrail._runtime_state.image_generation == 0
     finally:
         guardrail.stop()

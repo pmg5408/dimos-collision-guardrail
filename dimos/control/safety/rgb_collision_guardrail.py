@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from threading import Condition, Event, Thread
+from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any
 
@@ -50,8 +50,6 @@ logger = setup_logger()
 
 
 class RGBCollisionGuardrailConfig(ModuleConfig):
-    # Reject unknown keys: a stale or mistyped setting is otherwise dropped in
-    # silence and the guardrail runs on defaults nobody chose.
     model_config = ConfigDict(extra="forbid")
 
     # Scheduling
@@ -69,7 +67,7 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     static_scene_frame_count: int = Field(default=3, ge=1)
 
     # Which detector measures risk, selected by its `kind` tag; the module builds
-    # whichever config arrives and never learns which. Required.
+    # whichever config arrives. Required.
     policy: AnyPolicyConfig
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
 
@@ -86,18 +84,13 @@ class _GuardrailRuntimeState:
     state: GuardrailState = GuardrailState.INIT
     image_generation: int = 0
     last_evaluated_image_generation: int = -1
-    # Set by the callbacks, cleared by the worker. Unlike the pending flags this
-    # replaced, it never decides whether to publish -- only whether to sleep first.
+    # Set by the callbacks, cleared by the worker.
     wake_requested: bool = False
 
 
 @dataclass(frozen=True)
 class _InputSnapshot:
-    """A consistent read of the incoming streams, taken under the lock.
-
-    Captured so the expensive work of a decision runs outside the lock against
-    values that cannot change underneath it.
-    """
+    """A consistent read of the incoming streams, taken under the lock."""
 
     previous_image: Image | None
     current_image: Image | None
@@ -116,9 +109,8 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     forward motion is passed, clamped, or stopped according to the collision risk
     the detector reports.
 
-    Input callbacks store the newest value and wake the worker; one thread makes
-    every decision and is the sole writer of the output stream. It wakes whenever
-    input arrives and at least every 1/min_publish_hz, and publishes every time.
+    Input callbacks store the newest value and wake the worker; it also wakes
+    at least every 1/min_publish_hz, and publishes every time.
     """
 
     default_config = RGBCollisionGuardrailConfig
@@ -134,6 +126,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     _policy: GuardrailPolicy
     _hysteresis: RiskHysteresis
     _static_frame_hits: int
+    # Serialises the two writers of safe_cmd_vel: the worker and stop(). A lock of its
+    # own rather than _condition, because publish() runs consumer callbacks whose
+    # duration this module has no way to know, and holding _condition across them would
+    # delay the input callbacks behind whatever a consumer happens to do.
+    _output_lock: Lock
 
     def __init__(self, *, policy_override: GuardrailPolicy | None = None, **kwargs: Any) -> None:
         """Build the guardrail, optionally supplying the detector.
@@ -146,6 +143,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._policy = policy_override if policy_override is not None else self.config.policy.build()
         self._hysteresis = RiskHysteresis(self.config.hysteresis)
         self._static_frame_hits = 0
+        self._output_lock = Lock()
 
     @rpc
     def start(self) -> None:
@@ -159,11 +157,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._stop_event.clear()
 
         self._detach_inputs()
-        with self._condition:
-            self._runtime_state = _GuardrailRuntimeState()
-        self._hysteresis.reset()
-        self._policy.reset()
-        self._static_frame_hits = 0
+        self._reset_run_state()
 
         try:
             self._disposables.add(Disposable(self.color_image.subscribe(self._on_color_image)))
@@ -196,6 +190,9 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     def stop(self) -> None:
         was_running = self._thread is not None
 
+        # Ends the worker loop, and closes the output stream with it: every publish
+        # tests this flag while holding the output lock, so once it is set no decision
+        # can reach the stream, including one already in flight.
         self._stop_event.set()
 
         self._detach_inputs()
@@ -206,8 +203,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         if self._thread is not None:
             self._thread.join(timeout=_THREAD_JOIN_TIMEOUT_S)
             if self._thread.is_alive():
-                # Keep the handle so start() still refuses. Clearing it here would let a
-                # second worker run alongside this one, both writing the output stream.
                 logger.warning(
                     "RGB guardrail worker thread did not stop within timeout",
                     timeout_s=_THREAD_JOIN_TIMEOUT_S,
@@ -215,7 +210,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             else:
                 self._thread = None
         if was_running:
-            self.safe_cmd_vel.publish(Twist.zero())
+            # Under the output lock, so this lands behind any decision that is already
+            # publishing rather than interleaving with it. Every later decision finds
+            # the stop flag set, which is what leaves this zero as the final word.
+            with self._output_lock:
+                self.safe_cmd_vel.publish(Twist.zero())
 
         logger.info("RGB guardrail stopped")
         super().stop()
@@ -223,6 +222,30 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     def _detach_inputs(self) -> None:
         self._disposables.dispose()
         self._disposables = CompositeDisposable()
+
+    def _reset_run_state(self) -> None:
+        """Clear everything the worker accumulates across a run.
+
+        Only the runtime state is written under the lock. The rest is touched by the
+        worker alone, and start() has already established that no worker exists.
+        """
+        with self._condition:
+            self._runtime_state = _GuardrailRuntimeState()
+        self._hysteresis.reset()
+        self._policy.reset()
+        self._static_frame_hits = 0
+
+    def _publish_unless_stopping(self, cmd_vel: Twist) -> None:
+        """Write a decision to the output stream unless stop() has begun.
+
+        The test and the publish share one critical section. Split apart, stop() could
+        set the flag and publish its final zero in the gap between them, and this
+        command would land afterwards as the last thing the robot hears.
+        """
+        with self._output_lock:
+            if self._stop_event.is_set():
+                return
+            self.safe_cmd_vel.publish(cmd_vel)
 
     def _on_color_image(self, image: Image) -> None:
         now = time.monotonic()
@@ -265,8 +288,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             with self._condition:
                 self._store_decision_locked(decision)
 
-            if not self._stop_event.is_set():
-                self.safe_cmd_vel.publish(decision.cmd_vel)
+            self._publish_unless_stopping(decision.cmd_vel)
 
     def _tick_period_s(self) -> float:
         return 1.0 / self.config.min_publish_hz
@@ -335,11 +357,6 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         previous_image = snapshot.previous_image
         current_image = snapshot.current_image
         if previous_image is None or current_image is None:
-            # _input_failure_decision already rejected a missing frame, so this is
-            # unreachable. It stands because that guarantee lives in another method
-            # and nothing enforces it: if a later edit breaks it, the detector must
-            # not be handed a None, and the guardrail must not raise on the command
-            # path. Fail closed instead.
             self._hysteresis.reset()
             return self._build_degraded_decision("frame_pair_unavailable", snapshot)
 
