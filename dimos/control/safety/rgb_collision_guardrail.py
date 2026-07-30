@@ -339,10 +339,21 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             self._hysteresis.reset()
             return frozen_stream
 
+        previous_image = snapshot.previous_image
+        current_image = snapshot.current_image
+        if previous_image is None or current_image is None:
+            # _input_failure_decision already rejected a missing frame, so this is
+            # unreachable. It stands because that guarantee lives in another method
+            # and nothing enforces it: if a later edit breaks it, the detector must
+            # not be handed a None, and the guardrail must not raise on the command
+            # path. Fail closed instead.
+            self._hysteresis.reset()
+            return self._build_degraded_decision("frame_pair_unavailable", snapshot)
+
         try:
             assessment = self._policy.evaluate(
-                previous_image=snapshot.previous_image,
-                current_image=snapshot.current_image,
+                previous_image=previous_image,
+                current_image=current_image,
             )
         except Exception:
             last_decision = snapshot.last_decision
