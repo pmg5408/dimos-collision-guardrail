@@ -907,3 +907,46 @@ def test_restart_resets_runtime_state() -> None:
         assert state_after_restart == GuardrailState.INIT
     finally:
         guardrail.stop()
+
+
+def test_restart_clears_every_piece_of_accumulated_state() -> None:
+    """Pins the full list _reset_run_state is responsible for.
+
+    Each of these lives in a different object, so forgetting one leaks a latched
+    stop or a partial frame streak into the next run and nothing else notices.
+    """
+    policy = SequencePolicy([_assessment(RiskLevel.STOP)])
+    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
+        policy,
+        hysteresis={"stop_frame_count": 1},
+        static_scene_frame_count=3,
+        command_timeout_s=5.0,
+        image_timeout_s=5.0,
+    )
+
+    # One repeated frame banks a frozen-frame hit without reaching the threshold that
+    # would trip SENSOR_DEGRADED, so the latch and the streak are dirty at the same time.
+    frame = _textured_gray_image()
+    try:
+        cmd_transport.publish(_cmd(0.4))
+        image_transport.publish(frame)
+        image_transport.publish(frame)
+        _wait_for_decision(guardrail, lambda d: d.state == GuardrailState.STOP_LATCHED)
+    finally:
+        guardrail.stop()
+
+    assert guardrail._static_frame_hits == 1
+    # observe() is the only read of the hysteresis; a latched machine refuses to
+    # release on one clear observation, a freshly reset one is already at PASS.
+    assert guardrail._hysteresis.observe(RiskLevel.CLEAR) == GuardrailState.STOP_LATCHED
+
+    guardrail.start()
+    try:
+        assert guardrail._static_frame_hits == 0
+        assert guardrail._hysteresis.observe(RiskLevel.CLEAR) == GuardrailState.PASS
+        with guardrail._condition:
+            assert guardrail._runtime_state.state == GuardrailState.INIT
+            assert guardrail._runtime_state.last_decision is None
+            assert guardrail._runtime_state.image_generation == 0
+    finally:
+        guardrail.stop()

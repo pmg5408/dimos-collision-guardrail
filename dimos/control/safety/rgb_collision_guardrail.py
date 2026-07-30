@@ -157,11 +157,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._stop_event.clear()
 
         self._detach_inputs()
-        with self._condition:
-            self._runtime_state = _GuardrailRuntimeState()
-        self._hysteresis.reset()
-        self._policy.reset()
-        self._static_frame_hits = 0
+        self._reset_run_state()
 
         try:
             self._disposables.add(Disposable(self.color_image.subscribe(self._on_color_image)))
@@ -226,6 +222,18 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     def _detach_inputs(self) -> None:
         self._disposables.dispose()
         self._disposables = CompositeDisposable()
+
+    def _reset_run_state(self) -> None:
+        """Clear everything the worker accumulates across a run.
+
+        Only the runtime state is written under the lock. The rest is touched by the
+        worker alone, and start() has already established that no worker exists.
+        """
+        with self._condition:
+            self._runtime_state = _GuardrailRuntimeState()
+        self._hysteresis.reset()
+        self._policy.reset()
+        self._static_frame_hits = 0
 
     def _publish_unless_stopping(self, cmd_vel: Twist) -> None:
         """Write a decision to the output stream unless stop() has begun.
