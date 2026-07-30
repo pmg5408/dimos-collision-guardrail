@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from threading import Condition, Event, Thread
+from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any
 
@@ -126,6 +126,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     _policy: GuardrailPolicy
     _hysteresis: RiskHysteresis
     _static_frame_hits: int
+    # Serialises the two writers of safe_cmd_vel: the worker and stop(). A lock of its
+    # own rather than _condition, because publish() runs consumer callbacks whose
+    # duration this module has no way to know, and holding _condition across them would
+    # delay the input callbacks behind whatever a consumer happens to do.
+    _output_lock: Lock
 
     def __init__(self, *, policy_override: GuardrailPolicy | None = None, **kwargs: Any) -> None:
         """Build the guardrail, optionally supplying the detector.
@@ -138,6 +143,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self._policy = policy_override if policy_override is not None else self.config.policy.build()
         self._hysteresis = RiskHysteresis(self.config.hysteresis)
         self._static_frame_hits = 0
+        self._output_lock = Lock()
 
     @rpc
     def start(self) -> None:
@@ -188,6 +194,9 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     def stop(self) -> None:
         was_running = self._thread is not None
 
+        # Ends the worker loop, and closes the output stream with it: every publish
+        # tests this flag while holding the output lock, so once it is set no decision
+        # can reach the stream, including one already in flight.
         self._stop_event.set()
 
         self._detach_inputs()
@@ -205,7 +214,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             else:
                 self._thread = None
         if was_running:
-            self.safe_cmd_vel.publish(Twist.zero())
+            # Under the output lock, so this lands behind any decision that is already
+            # publishing rather than interleaving with it. Every later decision finds
+            # the stop flag set, which is what leaves this zero as the final word.
+            with self._output_lock:
+                self.safe_cmd_vel.publish(Twist.zero())
 
         logger.info("RGB guardrail stopped")
         super().stop()
@@ -213,6 +226,18 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
     def _detach_inputs(self) -> None:
         self._disposables.dispose()
         self._disposables = CompositeDisposable()
+
+    def _publish_unless_stopping(self, cmd_vel: Twist) -> None:
+        """Write a decision to the output stream unless stop() has begun.
+
+        The test and the publish share one critical section. Split apart, stop() could
+        set the flag and publish its final zero in the gap between them, and this
+        command would land afterwards as the last thing the robot hears.
+        """
+        with self._output_lock:
+            if self._stop_event.is_set():
+                return
+            self.safe_cmd_vel.publish(cmd_vel)
 
     def _on_color_image(self, image: Image) -> None:
         now = time.monotonic()
@@ -255,8 +280,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             with self._condition:
                 self._store_decision_locked(decision)
 
-            if not self._stop_event.is_set():
-                self.safe_cmd_vel.publish(decision.cmd_vel)
+            self._publish_unless_stopping(decision.cmd_vel)
 
     def _tick_period_s(self) -> float:
         return 1.0 / self.config.min_publish_hz
