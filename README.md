@@ -2,113 +2,159 @@
 
 [![CI](https://github.com/pmg5408/dimos-collision-guardrail/actions/workflows/ci.yml/badge.svg)](https://github.com/pmg5408/dimos-collision-guardrail/actions/workflows/ci.yml)
 
-An inline gate on a robot's motion-command stream. It sits between whatever produces the commands (a person-follower, a nav stack, teleop) and the motors, and vets each one against a single RGB camera before it passes. If the camera shows a likely frontal collision it **clamps** or **stops** forward motion; otherwise the command **passes** through untouched. CPU-only, 10 Hz.
+A safety gate that sits on a mobile robot's motion-command stream. Whatever produces the
+commands (a navigation stack, a person-follower, a human on a joystick) sends them here
+first. The guardrail checks each one against a single RGB camera, then either passes it
+through, slows it down, or stops forward motion. No depth sensor, no GPU, roughly 10 Hz
+on one CPU core.
 
-Built as a contribution to [dimOS](https://github.com/dimensionalOS/dimos), an open-source robotics OS, and proposed upstream in [dimensionalOS/dimos#1748](https://github.com/dimensionalOS/dimos/pull/1748).
+## Where this came from
 
-> **Running it:** the guardrail targets dimOS's module/stream runtime (`dimos.core`, `dimos.msgs`), which isn't vendored here. A small local stub of those interfaces stands in for them, so the full test suite and a demo run standalone — the stubs are a harness, not a dimOS reimplementation, and the [PR](https://github.com/dimensionalOS/dimos/pull/1748) shows the code in its native context.
+I wrote this as a contribution to [dimOS](https://github.com/dimensionalOS/dimos), an
+open-source robotics OS, and opened it upstream as
+[PR #1748](https://github.com/dimensionalOS/dimos/pull/1748). Since the work added new
+files rather than changing existing ones, I pulled those files into this repo and
+rebuilt it as a standalone project: local stubs of the two dimOS interfaces it depends
+on, and a runnable demo. Coming back to it after several months, a fair amount of it
+wanted redesigning, and most of the structure described below is the result of that
+second pass rather than the original draft.
+
+The stubs stand in for the dimOS runtime so the code runs on its own. They are a
+harness, not a reimplementation of dimOS.
+
+## How it works
+
+The images and the motion commands are produced elsewhere and pushed into the guardrail by
+calling into it. Whichever thread makes that call does not belong to us, so it has to be
+handed straight back. Running a vision pass inside that call would stall the camera driver
+or the code producing the commands, for the same reason you never do heavy work on a UI
+thread or inside an event loop.
+
+So the two callbacks do the least they can: save the newest value, flag that there is work
+waiting, and return. A worker thread picks it up from there and does everything else (callback offload).
+
+```mermaid
+flowchart LR
+    CAM["color_image"] --> CB1["callback:<br/>store newest frame"]
+    NAV["incoming_cmd_vel"] --> CB2["callback:<br/>store newest command"]
+    CB1 --> SNAP
+    CB2 --> SNAP
+    subgraph WORKER["one decision thread"]
+        SNAP["read inputs<br/>check freshness"] --> DET["detector:<br/>measure collision risk<br/>from the frame pair"]
+        DET --> GATE["decide a state,<br/>build a safe command"]
+    end
+    GATE --> OUT["safe_cmd_vel"]
+```
+
+Two useful things fall out of that split. The worker is the only thing that writes to the
+output, making it the single source of truth for the output motion commands. And because the
+callbacks overwrite rather than append, work cannot pile up: if the worker is busy, a newer
+frame replaces the one still waiting for it.
+
+Shutting down is the one exception where the thread calling `stop()` publishes a zero of
+its own, after the worker's last publish, so the robot is left stationary rather than 
+the worker's publish being the last one. Just in this scenario, there are two threads 
+writing one stream, so a lock keeps them in order and guarantees the zero is the last thing sent.
+
+The worker wakes whenever an input arrives, so the output keeps pace with whatever rate the
+sender is producing, and it wakes at least `min_publish_hz` times a second even when
+nothing arrives. So if the command producer stops sending, the last command goes stale and
+the guardrail publishes zero velocity of its own accord rather than letting the robot coast
+on an old instruction.
+
+Risk is only re-measured when a genuinely new pair of frames is waiting. A command stream
+running faster than the camera reuses the standing verdict instead of forcing extra
+vision work on camera input that has already been processed.
+
+## What it does when it sees something
+
+| State | What goes out on `safe_cmd_vel` |
+|---|---|
+| `PASS` | The upstream command, untouched |
+| `CLAMP` | Forward speed capped, turning preserved |
+| `STOP_LATCHED` | Forward speed zeroed, turning preserved so an operator can steer away |
+| `SENSOR_DEGRADED` | Zero velocity |
+| `INIT` | Zero velocity |
+
+Those first three states form a sequence, and the guardrail moves through it
+asymmetrically: tightening is quick, loosening is slow. Anything the
+guardrail cannot trust puts it in `SENSOR_DEGRADED` instead.
+
+## Swapping the detector
+
+The detector is the piece most likely to be thrown away and rewritten as better approaches
+turn up, so it is the only piece put behind an interface. Adding a new way of judging risk
+means writing one class containing the computation for that judgement and nothing else.
+There is no glue to write: no threading, no freshness handling, no registration wiring. The
+class declares a name for itself and becomes selectable from configuration, so any number of
+detectors can live in the repo at once.
+
+Two detectors are shipped here:
+
+```python
+RGBCollisionGuardrail(policy={"kind": "optical_flow"})      # Farneback flow magnitude
+RGBCollisionGuardrail(policy={"kind": "frame_difference"})  # mean intensity change
+```
+
+## Running it
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                    # full suite
-python examples/demo.py   # watch it clamp and stop on synthetic frames
+python examples/demo.py
 ```
 
----
+The demo feeds synthetic frames through the real module. Apparent motion climbs, holds,
+then settles back to a crawl:
 
-## Architecture
-
-Two layers with a deliberate seam between them:
-
-```mermaid
-flowchart LR
-    CAM["color_image (In)"] --> CB1["image callback:<br/>store latest frame pair"]
-    NAV["incoming_cmd_vel (In)"] --> CB2["cmd callback:<br/>store latest command"]
-    CB1 --> SNAP
-    CB2 --> SNAP
-    subgraph WORKER["single decision thread (~10 Hz)"]
-        SNAP["snapshot inputs<br/>+ freshness health"] --> POL["policy:<br/>grayscale → downsample → ROI<br/>→ quality gates → Farneback flow<br/>→ hysteresis state machine"]
-        POL --> GATE["gate: pass / clamp / stop,<br/>fail-closed fallbacks"]
-    end
-    GATE --> OUT["safe_cmd_vel (Out)"]
 ```
+step  shift  state           reason                   out m/s
+-------------------------------------------------------------
+   0   0.25  init            waiting_for_frame_pair      0.00
+   1   0.25  pass            risk_clear                  0.40
+   2   1.00  pass            risk_clear                  0.40
+   3   1.00  clamp           risk_clamp                  0.10
+   4   1.00  clamp           risk_clamp                  0.10
+   5   3.00  clamp           risk_clamp                  0.10
+   6   3.00  stop_latched    risk_stop                   0.00
+   7   3.00  stop_latched    risk_stop                   0.00
+   8   0.25  stop_latched    risk_stop                   0.00
+   9   0.25  clamp           risk_recovery               0.10
+  10   0.25  pass            risk_clear                  0.40
+  11   0.25  pass            risk_clear                  0.40
+  12   0.25  pass            risk_clear                  0.40
 
-- **[`rgb_collision_guardrail.py`](dimos/control/safety/rgb_collision_guardrail.py)** — the module shell: stream I/O, freshness checks, scheduling, publishing. Callbacks only store the latest input; all decisions run on one thread (why, in [Design decisions](#design-decisions-worth-reading-the-code-for)).
-
-  The guardrail sits on the single authoritative command path to the robot and gates whatever arrives on it, treating the most recent message as current. How that stream is produced upstream is outside what it needs to know.
-- **[`guardrail_policy.py`](dimos/control/safety/guardrail_policy.py)** — the collision detector behind a small `Protocol`: takes a frame pair, returns a decision. Optical flow in v1; that seam is the first design decision below.
-
-### The state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> INIT
-    INIT --> PASS: first healthy evaluation
-    PASS --> CLAMP: caution-level flow, N consecutive frames
-    CLAMP --> STOP_LATCHED: stop-level flow, N consecutive frames
-    CLAMP --> PASS: clear flow, N consecutive frames
-    STOP_LATCHED --> CLAMP: flow below stop level, N consecutive frames
-    PASS --> SENSOR_DEGRADED: stale / occluded / low-texture input
-    CLAMP --> SENSOR_DEGRADED: stale / occluded / low-texture input
-    STOP_LATCHED --> SENSOR_DEGRADED: stale / occluded / low-texture input
-    SENSOR_DEGRADED --> PASS: healthy input resumes
+final published command: 0.00 m/s (zeroed on stop)
 ```
-
-| State | Output on `safe_cmd_vel` |
-|---|---|
-| `PASS` | Upstream command, unmodified |
-| `CLAMP` | Forward speed capped (default 0.1 m/s); angular preserved |
-| `STOP_LATCHED` | `linear.x = 0`; angular preserved so the operator can steer away |
-| `INIT` / `SENSOR_DEGRADED` | Zero twist — fail closed |
-
-### Design decisions
-
-General systems-design calls with the camera and the robot as the setting where they're applied.
-
-- **The detector is swappable; the runtime around it is fixed.** Two files, one method between them. [`guardrail_policy.py`](dimos/control/safety/guardrail_policy.py) is the detector: give it a frame pair and it decides pass / clamp / stop — the optical flow, the quality gates, and the hysteresis that stops the verdict from flickering all live here. [`rgb_collision_guardrail.py`](dimos/control/safety/rgb_collision_guardrail.py) is the runtime: stream I/O, the thread, when to evaluate, input-freshness, fail-closed fallbacks, and publishing. They meet only at [`GuardrailPolicy.evaluate`](dimos/control/safety/guardrail_policy.py#L83). Swap the detector — optical flow today, a learned depth model tomorrow — and the runtime doesn't change a line.
-
-- **Image frames and commands run on separate clocks, so any upstream rate works.** Risk is re-evaluated only when a new camera frame arrives, capped at a fixed rate and independent of how fast commands come in. Each command is just checked against the latest risk verdict and sent on. *Faster than 10 Hz:* commands reuse the standing verdict instead of forcing extra computation. *Slower than 10 Hz:* each command still gets a fresh verdict, because evaluation never waited on it. *Stopped sending mid-stop:* a heartbeat keeps re-sending the safe output, so downstream doesn't drift back to the last command it heard.
-- **One thread makes every decision.** The output drives one motor, so only one command can ever be in effect — a natural single-owner resource, and a single writer matches it exactly. Nothing pushes back on that: one optical-flow pass at 10 Hz fits comfortably on one core, so a second thread would add coordination (locks, ordering, the chance of two paths racing to issue conflicting commands) to buy throughput the workload doesn't need. What the single thread buys instead is a control path that's one straight line from input to output — the kind you can read top to bottom and be sure of. For code whose bugs move a robot, that certainty is worth more than parallelism.
-- **The expensive work runs outside the lock.** The worker copies the inputs under a short lock, then runs optical flow without holding it, so a slow frame never blocks the camera or command callbacks ([`_decision_loop`](dimos/control/safety/rgb_collision_guardrail.py#L244-L311)).
-
-## The brief
-
-Everything above came from a spec that was one sentence long:
-
-> *"Build a collision guardrail that takes only RGB images as input and runs at 10 Hz."*
-
-No depth sensor, no prior robotics background, no familiarity with the codebase. The hard part wasn't the computer vision — it was turning that one sentence into decisions I could defend. Each row is a question the brief left open and the answer I chose:
-
-| Ambiguity in the brief | What I decided, and why |
-|---|---|
-| Where does it live in the OS? | A generic control-layer module that doesn't care what's upstream. The person-follow skill was the first thing to use it, not the reason it was shaped the way it is. |
-| What can RGB alone actually tell you? | No depth means no direct distance. Optical-flow magnitude in a forward region of interest is a cheap, classical proxy for "something is looming." And because RGB lies (dark rooms, blocked lens, blank walls), the module needs *image-quality gates* that refuse to trust unusable frames. |
-| What does 10 Hz constrain? | A per-frame compute budget. Frames are downsampled to 160 px width and cropped to the forward ROI before flow runs, keeping the hot path small enough for CPU. |
-| What *is* a guardrail here? | An inline command gate — a man-in-the-middle on `cmd_vel` that owns the last word on what reaches the base. Not an advisory signal someone else has to remember to check. |
-| What happens when inputs go wrong? | Fail closed, always. Input can be bad in three ways — never arrived, arrived but stale, arrived but unusable — and each one maps to a named state that outputs zero velocity. |
-| How should a stop *feel*? | Latched with hysteresis. A safety gate that flickers between stop and go on noisy single frames is worse than useless — release requires consecutive clear frames. Stops zero `linear.x` but preserve angular terms, so an operator can still steer out of trouble. |
-
-## Testing
-
-The suite (three files, shared helpers in [`test_utils.py`](dimos/control/safety/test_utils.py)) exercises the module through fake transports and injected policies rather than mocks of the framework:
-
-- **Policy-level**: deadband passthrough, quality-gate fail-closes, and the full hysteresis ladder (caution → clamp → stop → latched release) as frame-by-frame state sequences.
-- **Module-level**: every fail-closed fallback, policy-exception containment, and decision reuse under command bursts (risk evaluated at its own rate while commands stream through at 100 Hz).
-- **Integration-level**: end-to-end wiring, heartbeat republish timing, and a concurrency test that hammers the module with racing image/command threads and asserts a latched stop **never leaks a positive forward velocity** — the invariant that actually matters.
 
 ## Repo map
 
 ```
-dimos/control/safety/          # the guardrail: module + policy + tests
-├── rgb_collision_guardrail.py                  # module: I/O, scheduling, freshness, fail-closed gating
-├── guardrail_policy.py                         # policy: optical flow + hysteresis state machine
-├── test_guardrail_policy.py                    # policy unit tests
-├── test_rgb_collision_guardrail.py             # module unit tests
-├── test_rgb_collision_guardrail_integration.py # end-to-end + concurrency tests
-└── test_utils.py                               # fake transports, synthetic frames, shared helpers
+dimos/control/safety/
+├── rgb_collision_guardrail.py   # threading, freshness, fail-closed, publishing
+├── guardrail_policy.py          # the detector interface
+├── guardrail_hysteresis.py      # turns a run of readings into a state
+├── guardrail_types.py           # shared vocabulary
+└── policies/                    # the detectors
+    ├── _roi_detector.py         # shared preprocessing and quality gates
+    ├── optical_flow.py
+    └── frame_difference.py
 
-dimos/{core,msgs,utils}/       # local stubs of the dimOS runtime interfaces, so the above runs standalone
-examples/demo.py               # feeds synthetic frames through the module, prints the state ladder
-pyproject.toml                 # dependencies + pytest configuration
+dimos/{core,msgs,utils}/         # local stubs of the dimOS runtime
+examples/demo.py                 # the run above
 ```
+
+## Design notes
+
+- **Fail closed by default.** Bad input, missing input, or a crashing detector all
+  produce zero velocity with a named reason. There is no path where uncertainty results
+  in motion.
+- **The structural work is written once; the replaceable part is a leaf.** Threads, timing,
+  input validation, and failure behaviour all live in the runtime and are indifferent to
+  which detector is plugged in. A detector is one class and one method, with no knowledge of
+  how it will be scheduled or what happens to its answer. So the two halves change
+  independently, and the hard-won part does not get destabilised every time the easy part is
+  replaced.
+- **Expensive work runs outside the lock.** The worker copies what it needs under a short
+  lock and then runs the vision pass without holding it. The thread handoff keeps slow work
+  off the producer's thread; this keeps it from blocking the other callback too.
