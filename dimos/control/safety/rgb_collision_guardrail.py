@@ -322,12 +322,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             return input_failure
 
         if not self._forward_motion_commanded(snapshot.incoming_cmd_vel):
-            return self._build_decision(
-                GuardrailState.PASS,
-                "forward_guard_inactive",
-                0.0,
-                snapshot,
-            )
+            return self._build_decision(GuardrailState.PASS, "forward_guard_inactive", snapshot)
 
         if not snapshot.has_new_frame_pair:
             return self._held_decision(snapshot)
@@ -374,12 +369,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         if last_decision is None:
             return self._build_init_decision("waiting_for_first_decision", snapshot)
 
-        return self._build_decision(
-            last_decision.state,
-            last_decision.reason,
-            last_decision.risk_score,
-            snapshot,
-        )
+        return self._build_decision(last_decision.state, last_decision.reason, snapshot)
 
     def _input_failure_decision(self, snapshot: _InputSnapshot) -> GuardrailDecision | None:
         if snapshot.incoming_cmd_vel is None:
@@ -431,12 +421,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             return self._build_degraded_decision(assessment.reason, snapshot)
 
         state = self._hysteresis.observe(assessment.level)
-        return self._build_decision(
-            state,
-            self._reason_for_state(state, assessment),
-            assessment.score,
-            snapshot,
-        )
+        return self._build_decision(state, self._reason_for_state(state, assessment), snapshot)
 
     def _reason_for_state(self, state: GuardrailState, assessment: RiskAssessment) -> str:
         if state == GuardrailState.STOP_LATCHED:
@@ -477,21 +462,19 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self,
         state: GuardrailState,
         reason: str,
-        risk_score: float,
         snapshot: _InputSnapshot,
     ) -> GuardrailDecision:
         return GuardrailDecision(
             state=state,
             cmd_vel=self._command_for_state(state, snapshot),
             reason=reason,
-            risk_score=risk_score,
         )
 
     def _build_init_decision(self, reason: str, snapshot: _InputSnapshot) -> GuardrailDecision:
-        return self._build_decision(GuardrailState.INIT, reason, 0.0, snapshot)
+        return self._build_decision(GuardrailState.INIT, reason, snapshot)
 
     def _build_degraded_decision(self, reason: str, snapshot: _InputSnapshot) -> GuardrailDecision:
-        return self._build_decision(GuardrailState.SENSOR_DEGRADED, reason, 1.0, snapshot)
+        return self._build_decision(GuardrailState.SENSOR_DEGRADED, reason, snapshot)
 
     def _store_decision_locked(self, decision: GuardrailDecision) -> None:
         previous_state = self._runtime_state.state
