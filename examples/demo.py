@@ -2,8 +2,9 @@
 
 No robot, no camera, no dimOS runtime: the module runs on the local stub
 transport, fed by a synthetic sequence whose apparent motion rises past the
-caution and stop thresholds and then falls back to zero. The state walks
-PASS -> CLAMP -> STOP_LATCHED, then releases back through CLAMP to PASS.
+caution and stop thresholds and then settles back to a crawl. The state walks
+PASS -> CLAMP -> STOP_LATCHED and then releases back through CLAMP to PASS,
+which deliberately takes several clear frames.
 
 Run it with:  python examples/demo.py
 """
@@ -11,6 +12,7 @@ Run it with:  python examples/demo.py
 from __future__ import annotations
 
 import time
+from typing import cast
 
 import cv2
 import numpy as np
@@ -24,12 +26,12 @@ FRAME_HEIGHT = 120
 STEP_PERIOD_S = 0.15
 FORWARD_SPEED_MPS = 0.4
 
-# Pixels of apparent motion between consecutive frames. Mean optical-flow
-# magnitude tracks this almost directly, so the schedule walks the thresholds:
-# 0 px reads as clear, 1 px sits above the caution threshold (0.8), and 3 px is
-# past the stop threshold (1.5). The trailing zeros exercise hysteresis release,
-# which deliberately takes several clear frames.
-SHIFT_SCHEDULE = [0, 0, 1, 1, 1, 3, 3, 3, 0, 0, 0, 0, 0]
+# Pixels of apparent motion between consecutive frames. Mean optical-flow magnitude
+# tracks this almost directly, so the schedule walks the thresholds: a quarter pixel
+# reads as clear, 1 px sits above the caution threshold (0.8), and 3 px is past the
+# stop threshold (1.5). The tail crawls rather than stopping dead, because frames
+# that repeat exactly are read as a frozen camera rather than as a still scene.
+SHIFT_SCHEDULE = [0.25, 0.25, 1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 0.25, 0.25, 0.25, 0.25, 0.25]
 
 
 def _texture() -> np.ndarray:
@@ -38,6 +40,23 @@ def _texture() -> np.ndarray:
     rng = np.random.default_rng(0)
     coarse = rng.integers(0, 256, size=(FRAME_HEIGHT // 8, FRAME_WIDTH // 8), dtype=np.uint8)
     return cv2.resize(coarse, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_CUBIC)
+
+
+def _panned(base: np.ndarray, offset: float) -> np.ndarray:
+    """Slide the texture sideways by a possibly fractional number of pixels.
+
+    Sub-pixel offsets are the point: a whole-pixel step is already past the caution
+    threshold, so anything slower has to be interpolated.
+    """
+    translation = np.array([[1.0, 0.0, offset], [0.0, 1.0, 0.0]], dtype=np.float32)
+    panned = cv2.warpAffine(
+        base,
+        translation,
+        (FRAME_WIDTH, FRAME_HEIGHT),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_WRAP,
+    )
+    return cast("np.ndarray", panned)
 
 
 def main() -> None:
@@ -58,7 +77,7 @@ def main() -> None:
     guardrail.start()
 
     command = Twist(linear=[FORWARD_SPEED_MPS, 0.0, 0.0], angular=[0.0, 0.0, 0.3])
-    offset = 0
+    offset = 0.0
 
     print(f"\ncommanded forward speed: {FORWARD_SPEED_MPS} m/s\n")
     header = f"{'step':>4}  {'shift':>5}  {'state':<15} {'reason':<24} {'out m/s':>7}"
@@ -68,7 +87,7 @@ def main() -> None:
     try:
         for step, shift in enumerate(SHIFT_SCHEDULE):
             offset += shift
-            frame = Image.from_numpy(np.roll(base, offset, axis=1), format=ImageFormat.GRAY)
+            frame = Image.from_numpy(_panned(base, offset), format=ImageFormat.GRAY)
 
             guardrail.incoming_cmd_vel.transport.publish(command)
             guardrail.color_image.transport.publish(frame)
@@ -82,7 +101,7 @@ def main() -> None:
             out_x = published[-1].linear.x if published else float("nan")
             state = decision.state.value if decision else "-"
             reason = decision.reason if decision else "(no decision yet)"
-            print(f"{step:>4}  {shift:>5}  {state:<15} {reason:<24} {out_x:>7.2f}")
+            print(f"{step:>4}  {shift:>5.2f}  {state:<15} {reason:<24} {out_x:>7.2f}")
     finally:
         guardrail.stop()
         guardrail._close_module()
