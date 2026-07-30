@@ -16,8 +16,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.11",
     "pytest>=8.0",
     "pytest-mock>=3.12",
+    "ruff>=0.6",
 ]
 
 [tool.setuptools.packages.find]
@@ -29,3 +31,25 @@ pythonpath = ["."]
 markers = [
     "slow: timing-sensitive integration tests (excluded from the CI gate)",
 ]
+
+[tool.mypy]
+# No python_version pin: mypy targets the interpreter it runs on, and it has to run
+# on 3.12+ to parse dependency stubs that use PEP 695 `type` statements. Ruff's
+# target-version is what holds this package to its 3.11 floor.
+strict = true
+files = ["dimos", "examples"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint.isort]
+# Sort by module name within a section rather than splitting `import x` from
+# `from x import y`, which is how the imports in this repo already read.
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+# Message modules are named for the type they contain, mirroring the dimOS layout
+# these stubs stand in for. Renaming them would break the import paths the module
+# uses upstream.
+"dimos/msgs/**/*.py" = ["N999"]

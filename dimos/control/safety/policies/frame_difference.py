@@ -24,8 +24,8 @@ from pydantic import Field
 from dimos.control.safety.guardrail_policy import GuardrailPolicy
 from dimos.control.safety.policies._roi_detector import (
     GrayImage,
-    RoiDetector,
     PolicyRoiConfig,
+    RoiDetector,
 )
 
 
@@ -33,7 +33,7 @@ class FrameDifferencePolicyConfig(PolicyRoiConfig):
     """Settings for the frame-difference detector.
 
     The score is the mean absolute change in pixel intensity between the two ROIs,
-    on the 0-255 scale -- so its thresholds are far larger than the flow detector's.
+    on the 0-255 scale so its thresholds are far larger than the flow detector's.
     """
 
     kind: Literal["frame_difference"] = "frame_difference"

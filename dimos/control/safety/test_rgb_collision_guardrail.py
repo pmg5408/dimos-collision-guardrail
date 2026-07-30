@@ -20,8 +20,9 @@ import threading
 import time
 from typing import Any, TypeVar
 
-import pytest
 from pydantic import ValidationError
+import pytest
+from pytest_mock import MockerFixture
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
@@ -446,7 +447,7 @@ def test_frozen_stream_counter_advances_per_frame_pair_not_per_tick() -> None:
         guardrail.stop()
 
 
-def test_stop_keeps_the_thread_handle_when_the_join_times_out(mocker) -> None:
+def test_stop_keeps_the_thread_handle_when_the_join_times_out(mocker: MockerFixture) -> None:
     mocker.patch(
         "dimos.control.safety.rgb_collision_guardrail._THREAD_JOIN_TIMEOUT_S",
         0.05,
@@ -783,11 +784,13 @@ def test_restart_resets_runtime_state() -> None:
         guardrail.stop()
 
     with guardrail._condition:
-        assert guardrail._runtime_state.state == GuardrailState.STOP_LATCHED
+        state_before_restart: GuardrailState = guardrail._runtime_state.state
+    assert state_before_restart == GuardrailState.STOP_LATCHED
 
     guardrail.start()
     try:
         with guardrail._condition:
-            assert guardrail._runtime_state.state == GuardrailState.INIT
+            state_after_restart: GuardrailState = guardrail._runtime_state.state
+        assert state_after_restart == GuardrailState.INIT
     finally:
         guardrail.stop()

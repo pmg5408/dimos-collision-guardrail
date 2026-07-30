@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 import cv2
 import numpy as np
@@ -19,16 +20,16 @@ class Image:
     """Thin wrapper over a numpy pixel buffer plus its color format.
     """
 
-    def __init__(self, data: NDArray, format: ImageFormat) -> None:
+    def __init__(self, data: NDArray[Any], format: ImageFormat) -> None:
         self._data = np.array(data)
         self._format = format
 
     @classmethod
-    def from_numpy(cls, data: NDArray, format: ImageFormat = ImageFormat.RGB) -> Image:
+    def from_numpy(cls, data: NDArray[Any], format: ImageFormat = ImageFormat.RGB) -> Image:
         return cls(data, format)
 
     @property
-    def data(self) -> NDArray:
+    def data(self) -> NDArray[Any]:
         return self._data
 
     @property

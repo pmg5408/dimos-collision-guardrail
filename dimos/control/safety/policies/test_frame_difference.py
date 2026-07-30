@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
+from dimos.control.safety.guardrail_policy import RiskAssessment, RiskUnavailable
 from dimos.control.safety.policies.frame_difference import (
     FrameDifferenceGuardrailPolicy,
     FrameDifferencePolicyConfig,
@@ -54,6 +55,7 @@ def test_static_pair_scores_clear() -> None:
 
     result = _policy().evaluate(previous_image=frame, current_image=frame)
 
+    assert isinstance(result, RiskAssessment)
     assert result.level == RiskLevel.CLEAR
     assert result.score == pytest.approx(0.0)
 
@@ -64,6 +66,7 @@ def test_moving_pair_scores_positive() -> None:
         current_image=_textured_gray_image(shift_x=6),
     )
 
+    assert isinstance(result, RiskAssessment)
     assert result.score > 0.0
 
 
@@ -75,6 +78,7 @@ def test_quality_gating_is_inherited() -> None:
         current_image=_textured_gray_image(),
     )
 
+    assert isinstance(result, RiskUnavailable)
     assert result.reason == "previous_roi_occluded"
 
 

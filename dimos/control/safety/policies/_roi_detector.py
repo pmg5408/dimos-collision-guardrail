@@ -147,7 +147,7 @@ class RoiDetector(GuardrailPolicy):
 
         scale = target_width / float(width)
         target_height = max(round(height * scale), 2)
-        resized = cv2.resize(  # type: ignore[call-overload]
+        resized = cv2.resize(
             gray,
             (target_width, target_height),
             interpolation=cv2.INTER_AREA,

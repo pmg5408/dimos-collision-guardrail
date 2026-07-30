@@ -25,8 +25,8 @@ from pydantic import Field
 from dimos.control.safety.guardrail_policy import GuardrailPolicy
 from dimos.control.safety.policies._roi_detector import (
     GrayImage,
-    RoiDetector,
     PolicyRoiConfig,
+    RoiDetector,
 )
 
 
@@ -56,7 +56,7 @@ class OpticalFlowMagnitudeGuardrailPolicy(RoiDetector):
     _FARNEBACK_FLAGS = 0
 
     def _measure(self, previous_roi: GrayImage, current_roi: GrayImage) -> float:
-        flow = cv2.calcOpticalFlowFarneback(  # type: ignore[call-overload]
+        flow = cv2.calcOpticalFlowFarneback(
             previous_roi,
             current_roi,
             cast("Any", None),
