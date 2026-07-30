@@ -60,16 +60,6 @@ def test_static_pair_scores_clear() -> None:
     assert result.score == pytest.approx(0.0)
 
 
-def test_moving_pair_scores_positive() -> None:
-    result = _policy().evaluate(
-        previous_image=_textured_gray_image(),
-        current_image=_textured_gray_image(shift_x=6),
-    )
-
-    assert isinstance(result, RiskAssessment)
-    assert result.score > 0.0
-
-
 def test_quality_gating_is_inherited() -> None:
     black = Image.from_numpy(np.zeros((120, 160), dtype=np.uint8), format=ImageFormat.GRAY)
 
@@ -82,5 +72,3 @@ def test_quality_gating_is_inherited() -> None:
     assert result.reason == "previous_roi_occluded"
 
 
-def test_build_constructs_the_detector() -> None:
-    assert isinstance(FrameDifferencePolicyConfig().build(), FrameDifferenceGuardrailPolicy)

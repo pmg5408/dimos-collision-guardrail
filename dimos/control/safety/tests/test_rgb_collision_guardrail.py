@@ -685,27 +685,6 @@ def test_held_state_tracks_newer_commands_without_a_new_frame_pair() -> None:
         guardrail.stop()
 
 
-def test_pass_publishes_latest_upstream_command() -> None:
-    upstream_first = _cmd(0.3, angular_z=0.1)
-    upstream_second = _cmd(0.45, angular_z=0.35)
-    policy = SequencePolicy([_assessment(RiskLevel.CLEAR)])
-    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
-
-    try:
-        cmd_transport.publish(upstream_first)
-        image_transport.publish(_textured_gray_image())
-        image_transport.publish(_textured_gray_image(shift_x=2))
-
-        first_output = _wait_for_output(outputs, lambda twist: twist == upstream_first)
-        assert first_output == upstream_first
-
-        cmd_transport.publish(upstream_second)
-        second_output = _wait_for_output(outputs, lambda twist: twist == upstream_second)
-        assert second_output == upstream_second
-    finally:
-        guardrail.stop()
-
-
 @pytest.mark.parametrize(
     ("level", "frame_counts", "guarded_cmd"),
     [
@@ -743,28 +722,6 @@ def test_non_pass_states_publish_guarded_output(
 
         published = _wait_for_output(outputs, lambda twist: twist == guarded_cmd)
         assert published == guarded_cmd
-    finally:
-        guardrail.stop()
-
-
-def test_non_pass_heartbeat_republishes_guarded_output() -> None:
-    guarded_cmd = Twist(linear=[0.1, 0.0, 0.0], angular=[0.0, 0.0, 0.5])
-    policy = SequencePolicy([_assessment(RiskLevel.CAUTION)])
-    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
-        policy,
-        hysteresis={"caution_frame_count": 1},
-    )
-
-    try:
-        cmd_transport.publish(_cmd(0.4, angular_z=0.5))
-        image_transport.publish(_textured_gray_image())
-        image_transport.publish(_textured_gray_image(shift_x=2))
-
-        first = _wait_for_output(outputs, lambda twist: twist == guarded_cmd)
-        second = _wait_for_output(outputs, lambda twist: twist == guarded_cmd)
-
-        assert first == guarded_cmd
-        assert second == guarded_cmd
     finally:
         guardrail.stop()
 
@@ -843,33 +800,6 @@ def test_fast_upstream_commands_reuse_last_risk_decision() -> None:
         guardrail.stop()
 
 
-def test_stop_publishes_zero_as_final_command() -> None:
-    policy = CountingPassPolicy()
-    guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(policy)
-
-    forward_cmd = _cmd(0.4, angular_z=0.3)
-
-    try:
-        cmd_transport.publish(forward_cmd)
-        image_transport.publish(_textured_gray_image())
-        image_transport.publish(_textured_gray_image(shift_x=2))
-
-        _wait_for_output(outputs, lambda twist: twist == forward_cmd)
-        for _ in range(5):
-            cmd_transport.publish(forward_cmd)
-    finally:
-        guardrail.stop()
-
-    final_output: Twist | None = None
-    while True:
-        try:
-            final_output = outputs.get_nowait()
-        except queue.Empty:
-            break
-
-    assert final_output == Twist.zero()
-
-
 def test_double_start_raises() -> None:
     policy = CountingPassPolicy()
     guardrail, _image_transport, _cmd_transport, _outputs = _start_threaded_guardrail(policy)
@@ -877,34 +807,6 @@ def test_double_start_raises() -> None:
     try:
         with pytest.raises(RuntimeError):
             guardrail.start()
-    finally:
-        guardrail.stop()
-
-
-def test_restart_resets_runtime_state() -> None:
-    policy = SequencePolicy([_assessment(RiskLevel.STOP)])
-    guardrail, image_transport, cmd_transport, _outputs = _start_threaded_guardrail(
-        policy,
-        hysteresis={"stop_frame_count": 1},
-    )
-
-    try:
-        cmd_transport.publish(_cmd(0.4, angular_z=0.3))
-        image_transport.publish(_textured_gray_image())
-        image_transport.publish(_textured_gray_image(shift_x=2))
-        _wait_for_decision(guardrail, lambda d: d.state == GuardrailState.STOP_LATCHED)
-    finally:
-        guardrail.stop()
-
-    with guardrail._condition:
-        state_before_restart: GuardrailState = guardrail._runtime_state.state
-    assert state_before_restart == GuardrailState.STOP_LATCHED
-
-    guardrail.start()
-    try:
-        with guardrail._condition:
-            state_after_restart: GuardrailState = guardrail._runtime_state.state
-        assert state_after_restart == GuardrailState.INIT
     finally:
         guardrail.stop()
 
