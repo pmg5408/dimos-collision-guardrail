@@ -21,7 +21,7 @@ import numpy as np
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import RiskAssessment, RiskResult
-from dimos.core.stream import Out, Transport
+from dimos.core.stream import Transport, _Stream
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 
@@ -38,14 +38,14 @@ class FakeTransport(Transport[T]):
     def stop(self) -> None:
         pass
 
-    def broadcast(self, selfstream: Out[T] | None, value: T) -> None:
+    def broadcast(self, selfstream: _Stream[T] | None, value: T) -> None:
         for callback in list(self._subscribers):
             callback(value)
 
     def subscribe(
         self,
         callback: Callable[[T], Any],
-        selfstream=None,  # type: ignore[no-untyped-def]
+        selfstream: _Stream[T] | None = None,
     ) -> Callable[[], None]:
         self._subscribers.append(callback)
 

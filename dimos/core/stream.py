@@ -27,13 +27,13 @@ class Transport(Generic[T]):
     def stop(self) -> None:
         raise NotImplementedError
 
-    def broadcast(self, selfstream: "_Stream[T] | None", value: T) -> None:
+    def broadcast(self, selfstream: _Stream[T] | None, value: T) -> None:
         raise NotImplementedError
 
     def subscribe(
         self,
         callback: Subscriber[T],
-        selfstream: "_Stream[T] | None" = None,
+        selfstream: _Stream[T] | None = None,
     ) -> Unsubscribe:
         raise NotImplementedError
 
@@ -59,14 +59,14 @@ class LocalTransport(Transport[T]):
     def stop(self) -> None:
         pass
 
-    def broadcast(self, selfstream: "_Stream[T] | None", value: T) -> None:
+    def broadcast(self, selfstream: _Stream[T] | None, value: T) -> None:
         for callback in list(self._subscribers):
             callback(value)
 
     def subscribe(
         self,
         callback: Subscriber[T],
-        selfstream: "_Stream[T] | None" = None,
+        selfstream: _Stream[T] | None = None,
     ) -> Unsubscribe:
         self._subscribers.append(callback)
 

@@ -119,7 +119,7 @@ def test_stream_wiring_end_to_end_passes_upstream_twist(
         queue.Queue[tuple[float, Twist]],
     ],
 ) -> None:
-    guardrail, image_transport, cmd_transport, outputs = started_guardrail
+    _guardrail, image_transport, cmd_transport, outputs = started_guardrail
 
     upstream = _cmd(0.03, angular_z=0.15)
 
@@ -188,7 +188,7 @@ def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() ->
                 shift += 1
                 image_transport.publish(_textured_gray_image(shift_x=shift))
                 time.sleep(0.01)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a thread must not lose its failure
             errors.append(exc)
 
     def publish_commands() -> None:
@@ -199,7 +199,7 @@ def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() ->
                 cmd_transport.publish(_cmd(speeds[idx % len(speeds)], angular_z=0.2))
                 idx += 1
                 time.sleep(0.01)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a thread must not lose its failure
             errors.append(exc)
 
     try:
@@ -243,7 +243,7 @@ def test_black_frame_end_to_end_fail_closes_to_zero(
         queue.Queue[tuple[float, Twist]],
     ],
 ) -> None:
-    guardrail, image_transport, cmd_transport, outputs = started_guardrail
+    _guardrail, image_transport, cmd_transport, outputs = started_guardrail
 
     cmd_transport.publish(_cmd(0.3, angular_z=0.1))
     image_transport.publish(_textured_gray_image())
@@ -291,7 +291,7 @@ def test_stale_command_end_to_end_fail_closes_to_zero(
         queue.Queue[tuple[float, Twist]],
     ],
 ) -> None:
-    guardrail, image_transport, cmd_transport, outputs = started_guardrail
+    _guardrail, image_transport, cmd_transport, outputs = started_guardrail
 
     # Keep the initial command below deadband so this test is about
     # stale-command fail-close, not optical-flow clamp behavior.

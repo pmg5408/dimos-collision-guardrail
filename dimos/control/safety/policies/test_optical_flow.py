@@ -17,8 +17,9 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 from pydantic import ValidationError
+import pytest
+from pytest_mock import MockerFixture
 
 from dimos.control.safety.guardrail_hysteresis import RiskLevel
 from dimos.control.safety.guardrail_policy import (
@@ -69,7 +70,9 @@ def test_contradictory_settings_are_rejected(
 
 def test_unknown_setting_is_rejected() -> None:
     with pytest.raises(ValidationError, match="stop_flow_magnitude_threshhold"):
-        OpticalFlowMagnitudePolicyConfig(stop_flow_magnitude_threshhold=1.5)
+        OpticalFlowMagnitudePolicyConfig.model_validate(
+            {"stop_flow_magnitude_threshhold": 1.5}
+        )
 
 
 def _uniform_gray_image(value: int, *, width: int = 160, height: int = 120) -> Image:
@@ -172,7 +175,7 @@ def test_flow_magnitude_maps_to_risk_level(
 
 def test_assessment_score_is_the_measured_flow_magnitude(
     image_pair: tuple[Image, Image],
-    mocker,
+    mocker: MockerFixture,
 ) -> None:
     policy = _policy()
     mocker.patch.object(policy, "_measure", return_value=1.75)
