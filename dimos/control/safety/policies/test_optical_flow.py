@@ -69,7 +69,9 @@ def test_contradictory_settings_are_rejected(
 
 def test_unknown_setting_is_rejected() -> None:
     with pytest.raises(ValidationError, match="stop_flow_magnitude_threshhold"):
-        OpticalFlowMagnitudePolicyConfig(stop_flow_magnitude_threshhold=1.5)
+        OpticalFlowMagnitudePolicyConfig.model_validate(
+            {"stop_flow_magnitude_threshhold": 1.5}
+        )
 
 
 def _uniform_gray_image(value: int, *, width: int = 160, height: int = 120) -> Image:
