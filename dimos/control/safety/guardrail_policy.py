@@ -64,9 +64,9 @@ class GuardrailPolicy(Protocol):
 class PolicyConfig(BaseModel, ABC):
     """Settings for one detector, and the means of constructing the detector.
 
-    A detector is chosen by configuration, so its settings have to survive being
-    written as data. Building the detector belongs here rather than in the module
-    because only the config knows which detector its own values describe.
+    A detector is chosen by configuration. Building the detector belongs here
+    rather than in the module because only the config knows which detector
+    its own values describe.
 
     Subclasses declare a `kind` Literal, which is the tag the config is selected by.
     """

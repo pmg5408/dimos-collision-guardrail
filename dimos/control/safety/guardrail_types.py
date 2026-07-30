@@ -35,4 +35,3 @@ class GuardrailDecision:
     state: GuardrailState
     cmd_vel: Twist
     reason: str
-    risk_score: float = 0.0

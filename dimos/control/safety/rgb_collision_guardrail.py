@@ -55,13 +55,11 @@ class RGBCollisionGuardrailConfig(ModuleConfig):
     model_config = ConfigDict(extra="forbid")
 
     # Scheduling
-    decision_hz: float = Field(default=10.0, gt=0.0)
+    min_publish_hz: float = Field(default=10.0, gt=0.0)
 
     # Freshness and fail-closed behavior
     command_timeout_s: float = Field(default=0.25, gt=0.0)
     image_timeout_s: float = Field(default=0.25, gt=0.0)
-    fail_closed_on_missing_image: bool = True
-    publish_zero_on_stop: bool = True
     frame_pair_max_gap_s: float = Field(default=0.2, gt=0.0)
 
     # Motion gating
@@ -120,7 +118,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
     Input callbacks store the newest value and wake the worker; one thread makes
     every decision and is the sole writer of the output stream. It wakes whenever
-    input arrives and at least every 1/decision_hz, and publishes every time.
+    input arrives and at least every 1/min_publish_hz, and publishes every time.
     """
 
     default_config = RGBCollisionGuardrailConfig
@@ -188,7 +186,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
         logger.info(
             "RGB guardrail started",
-            decision_hz=self.config.decision_hz,
+            min_publish_hz=self.config.min_publish_hz,
             command_timeout_s=self.config.command_timeout_s,
             image_timeout_s=self.config.image_timeout_s,
             frame_pair_max_gap_s=self.config.frame_pair_max_gap_s,
@@ -216,7 +214,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                 )
             else:
                 self._thread = None
-        if was_running and self.config.publish_zero_on_stop:
+        if was_running:
             self.safe_cmd_vel.publish(Twist.zero())
 
         logger.info("RGB guardrail stopped")
@@ -271,7 +269,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
                 self.safe_cmd_vel.publish(decision.cmd_vel)
 
     def _tick_period_s(self) -> float:
-        return 1.0 / self.config.decision_hz
+        return 1.0 / self.config.min_publish_hz
 
     def _take_input_snapshot_locked(self, now: float) -> _InputSnapshot:
         runtime_state = self._runtime_state
@@ -324,12 +322,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             return input_failure
 
         if not self._forward_motion_commanded(snapshot.incoming_cmd_vel):
-            return self._build_decision(
-                GuardrailState.PASS,
-                "forward_guard_inactive",
-                0.0,
-                snapshot,
-            )
+            return self._build_decision(GuardrailState.PASS, "forward_guard_inactive", snapshot)
 
         if not snapshot.has_new_frame_pair:
             return self._held_decision(snapshot)
@@ -376,12 +369,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         if last_decision is None:
             return self._build_init_decision("waiting_for_first_decision", snapshot)
 
-        return self._build_decision(
-            last_decision.state,
-            last_decision.reason,
-            last_decision.risk_score,
-            snapshot,
-        )
+        return self._build_decision(last_decision.state, last_decision.reason, snapshot)
 
     def _input_failure_decision(self, snapshot: _InputSnapshot) -> GuardrailDecision | None:
         if snapshot.incoming_cmd_vel is None:
@@ -389,15 +377,11 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
 
         current_image = snapshot.current_image
         if current_image is None:
-            if self.config.fail_closed_on_missing_image:
-                return self._build_init_decision("waiting_for_first_image", snapshot)
-            return None
+            return self._build_init_decision("waiting_for_first_image", snapshot)
 
         previous_image = snapshot.previous_image
         if previous_image is None:
-            if self.config.fail_closed_on_missing_image:
-                return self._build_init_decision("waiting_for_frame_pair", snapshot)
-            return None
+            return self._build_init_decision("waiting_for_frame_pair", snapshot)
 
         if not snapshot.image_fresh:
             return self._build_degraded_decision("image_stale", snapshot)
@@ -437,12 +421,7 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
             return self._build_degraded_decision(assessment.reason, snapshot)
 
         state = self._hysteresis.observe(assessment.level)
-        return self._build_decision(
-            state,
-            self._reason_for_state(state, assessment),
-            assessment.score,
-            snapshot,
-        )
+        return self._build_decision(state, self._reason_for_state(state, assessment), snapshot)
 
     def _reason_for_state(self, state: GuardrailState, assessment: RiskAssessment) -> str:
         if state == GuardrailState.STOP_LATCHED:
@@ -483,21 +462,19 @@ class RGBCollisionGuardrail(Module[RGBCollisionGuardrailConfig]):
         self,
         state: GuardrailState,
         reason: str,
-        risk_score: float,
         snapshot: _InputSnapshot,
     ) -> GuardrailDecision:
         return GuardrailDecision(
             state=state,
             cmd_vel=self._command_for_state(state, snapshot),
             reason=reason,
-            risk_score=risk_score,
         )
 
     def _build_init_decision(self, reason: str, snapshot: _InputSnapshot) -> GuardrailDecision:
-        return self._build_decision(GuardrailState.INIT, reason, 0.0, snapshot)
+        return self._build_decision(GuardrailState.INIT, reason, snapshot)
 
     def _build_degraded_decision(self, reason: str, snapshot: _InputSnapshot) -> GuardrailDecision:
-        return self._build_decision(GuardrailState.SENSOR_DEGRADED, reason, 1.0, snapshot)
+        return self._build_decision(GuardrailState.SENSOR_DEGRADED, reason, snapshot)
 
     def _store_decision_locked(self, decision: GuardrailDecision) -> None:
         previous_state = self._runtime_state.state

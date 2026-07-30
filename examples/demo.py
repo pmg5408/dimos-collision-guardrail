@@ -45,7 +45,7 @@ def main() -> None:
 
     guardrail = RGBCollisionGuardrail(
         policy={"kind": "optical_flow"},
-        decision_hz=10.0,
+        min_publish_hz=10.0,
         # Generous freshness windows: this demo is about the flow -> hysteresis
         # ladder, not the staleness fail-closed paths (those have their own tests).
         command_timeout_s=1.0,
@@ -61,7 +61,7 @@ def main() -> None:
     offset = 0
 
     print(f"\ncommanded forward speed: {FORWARD_SPEED_MPS} m/s\n")
-    header = f"{'step':>4}  {'shift':>5}  {'state':<15} {'reason':<24} {'flow':>6}  {'out m/s':>7}"
+    header = f"{'step':>4}  {'shift':>5}  {'state':<15} {'reason':<24} {'out m/s':>7}"
     print(header)
     print("-" * len(header))
 
@@ -82,8 +82,7 @@ def main() -> None:
             out_x = published[-1].linear.x if published else float("nan")
             state = decision.state.value if decision else "-"
             reason = decision.reason if decision else "(no decision yet)"
-            flow = f"{decision.risk_score:>6.2f}" if decision else f"{'-':>6}"
-            print(f"{step:>4}  {shift:>5}  {state:<15} {reason:<24} {flow}  {out_x:>7.2f}")
+            print(f"{step:>4}  {shift:>5}  {state:<15} {reason:<24} {out_x:>7.2f}")
     finally:
         guardrail.stop()
         guardrail._close_module()

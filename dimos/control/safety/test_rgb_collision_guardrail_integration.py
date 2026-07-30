@@ -57,7 +57,7 @@ def _start_guardrail(
     config: dict[str, Any] = {
         # A configured detector is required; policy_override replaces it when given.
         "policy": {"kind": "optical_flow"},
-        "decision_hz": 20.0,
+        "min_publish_hz": 20.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
     }
@@ -135,7 +135,7 @@ def test_stream_wiring_end_to_end_passes_upstream_twist(
 def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
         SequencePolicy([_assessment(RiskLevel.CAUTION)]),
-        decision_hz=20.0,
+        min_publish_hz=20.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
         hysteresis={"caution_frame_count": 1},
@@ -157,7 +157,7 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
         assert msg2 == guarded
 
         interval = t2 - t1
-        expected_period = 1.0 / guardrail.config.decision_hz
+        expected_period = 1.0 / guardrail.config.min_publish_hz
 
         assert expected_period * 0.5 <= interval <= expected_period * 2.0
     finally:
@@ -168,7 +168,7 @@ def test_non_pass_output_is_republished_while_upstream_is_quiet() -> None:
 def test_forced_stop_never_leaks_positive_linear_x_under_concurrent_updates() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
         SequencePolicy([_assessment(RiskLevel.STOP)]),
-        decision_hz=30.0,
+        min_publish_hz=30.0,
         command_timeout_s=0.5,
         image_timeout_s=0.5,
         hysteresis={"stop_frame_count": 1},
@@ -256,7 +256,7 @@ def test_black_frame_end_to_end_fail_closes_to_zero(
 @pytest.mark.slow
 def test_stale_image_end_to_end_fail_closes_without_new_command() -> None:
     guardrail, image_transport, cmd_transport, outputs = _start_guardrail(
-        decision_hz=25.0,
+        min_publish_hz=25.0,
         command_timeout_s=0.5,
         image_timeout_s=0.08,
     )

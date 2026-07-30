@@ -85,7 +85,7 @@ class CountingPassPolicy:
 def module() -> Iterator[RGBCollisionGuardrail]:
     guardrail = RGBCollisionGuardrail(
         policy={"kind": "optical_flow"},
-        decision_hz=50.0,
+        min_publish_hz=50.0,
         command_timeout_s=0.05,
         image_timeout_s=0.05,
     )
@@ -135,7 +135,7 @@ def _start_threaded_guardrail(
     config: dict[str, Any] = {
         # A configured detector is required; policy_override replaces it below.
         "policy": {"kind": "optical_flow"},
-        "decision_hz": 50.0,
+        "min_publish_hz": 50.0,
         "command_timeout_s": 0.3,
         "image_timeout_s": 0.3,
     }
@@ -495,7 +495,7 @@ def test_command_arriving_during_evaluation_is_not_delayed_to_the_next_tick() ->
 
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         SlowPolicy(),
-        decision_hz=2.0,
+        min_publish_hz=2.0,
         command_timeout_s=5.0,
         image_timeout_s=5.0,
     )
@@ -524,7 +524,7 @@ def test_output_continues_at_the_tick_rate_without_new_input() -> None:
     policy = CountingPassPolicy()
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        decision_hz=50.0,
+        min_publish_hz=50.0,
         command_timeout_s=5.0,
         image_timeout_s=5.0,
     )
@@ -690,7 +690,7 @@ def test_fast_upstream_commands_reuse_last_risk_decision() -> None:
     policy = CountingPassPolicy()
     guardrail, image_transport, cmd_transport, outputs = _start_threaded_guardrail(
         policy,
-        decision_hz=2.0,
+        min_publish_hz=2.0,
         command_timeout_s=1.0,
         image_timeout_s=1.0,
     )
